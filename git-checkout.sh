@@ -164,7 +164,7 @@ if [ "$REPO" ]; then
 	else
 		URL=git@github.com:$REPO
 	fi
-else
+fi
 
 if [ -z "$REF_DIR" ]; then
 	:

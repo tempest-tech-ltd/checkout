@@ -1,6 +1,6 @@
 const core = require('@actions/core');
-const github = require('@actions/github');
 const exec = require('@actions/exec');
+const github = require('@actions/github');
 
 async function run() {
   try {
@@ -10,7 +10,7 @@ async function run() {
     const targetReference = core.getInput('ref');
     const clean = core.getInput('clean') === 'true';
 
-    let cmd = `bash git-checkout.sh --debug --repo "${repository}" --ref-dir "${referenceDirectory}"`
+    let cmd = `${__dirname}/git-checkout.sh --debug --repo "${repository}" --ref-dir "${referenceDirectory}"`
     if (targetDirectory) {
       cmd += ` --target-dir "${targetDirectory}"`
     }
@@ -19,6 +19,9 @@ async function run() {
     }
     if (clean) {
       cmd += ' --clean'
+    }
+    if (process.platform === 'win32') {
+      cmd = 'bash ' + cmd
     }
 
     await exec.exec(`echo ${cmd}`);
