@@ -10,7 +10,7 @@ async function run() {
     const targetReference = core.getInput('ref');
     const clean = core.getInput('clean') === 'true';
 
-    let cmd = `${__dirname}/git-checkout.sh --debug --repo "${repository}" --ref-dir "${referenceDirectory}"`
+    let cmd = `${__dirname}/git-checkout.sh --debug --repo "https://github.com/${repository}" --ref-dir "${referenceDirectory}"`
     if (targetDirectory) {
       cmd += ` --target-dir "${targetDirectory}"`
     }

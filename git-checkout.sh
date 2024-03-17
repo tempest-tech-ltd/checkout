@@ -3,7 +3,7 @@
 set -e
 
 usage() {
-	echo Usage: `basename $0` "[--repo GITHUB_REPO] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
+	echo Usage: `basename $0` "[--repo REPO_URL] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
 	exit 1
 }
 
@@ -24,11 +24,8 @@ set_git_cfg() {
 
 guess_repo() {
 	GURL=$(git config --get remote.origin.url)
-	GREPO=${GURL#git@github.com:}
-	GREPO=${GREPO#https://github.com/}
-	if [ "$REPO" != "$GREPO" ]; then
-		[ "$REPO" ] && echo "Error: repo mismatch $REPO vs $GREPO ($URL vs $GURL)" && exit 1
-		REPO=$GREPO
+	if [ "$URL" != "$GURL" ]; then
+		[ "$URL" ] && echo "Error: repo mismatch $URL vs $GURL" && exit 1
 		URL=$GURL
 	fi
 	set_git_cfg
@@ -112,7 +109,7 @@ checkout() {
 
 [ $# -eq 0 ] && usage
 
-REPO=
+URL=
 REF_DIR=
 TARGET_DIR=
 TARGET_REF=
@@ -121,7 +118,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--repo)
 			[ -z "$2" ] && echo Error: --repo requires an argument && usage
-			REPO=$2
+			URL=$2
 			shift 2
 			;;
 		--ref-dir)
@@ -157,14 +154,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-if [ "$REPO" ]; then
-	[ "$REPO" = "${REPO%.git}" ] && REPO=$REPO.git
-	if [ "$GITHUB_TOKEN" ]; then
-		URL=https://github.com/$REPO
-	else
-		URL=git@github.com:$REPO
-	fi
-fi
+[ "$URL" ] && [ "$URL" = "${URL%.git}" ] && URL=$URL.git
 
 if [ -z "$REF_DIR" ]; then
 	:
