@@ -1,15 +1,16 @@
 const core = require('@actions/core');
+const github = require('@actions/github');
 const exec = require('@actions/exec');
 
 async function run() {
   try {
-    const project = core.getInput('project');
-    const referenceDirectory = core.getInput('common-path') || `${project}.git`;
+    const repository = core.getInput('repository') || github.context.repo.repo;
+    const referenceDirectory = core.getInput('common-path') || `${repository}.git`;
     const targetDirectory = core.getInput('path');
     const targetReference = core.getInput('ref');
     const clean = core.getInput('clean') === 'true';
 
-    let cmd = `bash git-checkout.sh --debug --project "${project}" --ref-dir "${referenceDirectory}"`
+    let cmd = `bash git-checkout.sh --debug --repo "${repository}" --ref-dir "${referenceDirectory}"`
     if (targetDirectory) {
       cmd += ` --target-dir "${targetDirectory}"`
     }

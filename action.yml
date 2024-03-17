@@ -1,17 +1,18 @@
 name: 'Checkout'
 description: 'Checkout a Git repo using --reference'
 inputs:
-  project:
-    description: 'Project (tempest or chromium).'
-    default: 'tempest'
+  repository:
+    description: >
+      GitHub full repo name
+      Default: ${{ github.repository }}
   common-path:
     description: >
-      Common/reference git repo path under $GITHUB_WORKSPACE.
-      Default: ${project}.git
+      Common (reference) git repo path under $GITHUB_WORKSPACE
+      Default: ${repository}.git
   path:
-    description: 'Relative path under $GITHUB_WORKSPACE to place the repository.'
+    description: 'Relative path under $GITHUB_WORKSPACE to place the repository'
   ref:
-    description: 'The branch, tag or SHA to checkout.'
+    description: 'The branch, tag or SHA to checkout'
   clean:
     description: 'Whether to clean working directory or not'
     default: true

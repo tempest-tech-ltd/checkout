@@ -2,53 +2,32 @@
 
 set -e
 
-CHROMIUM_ORIG_HTTPS_URL=https://chromium.googlesource.com/chromium/src.git
-CHROMIUM_GITHUB_HTTPS_URL=https://github.com/chromium/chromium.git
-CHROMIUM_GITHUB_SSH_URL=git@github.com:chromium/chromium.git
-TEMPEST_HTTPS_URL=https://github.com/tempest-tech-ltd/Core.git
-TEMPEST_SSH_URL=git@github.com:tempest-tech-ltd/Core.git
-
 usage() {
-	echo Usage: `basename $0` "[--project chromium|tempest] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
+	echo Usage: `basename $0` "[--repo GITHUB_REPO] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
 	exit 1
 }
 
 set_git_cfg() {
-	if [ "$URL" == "$TEMPEST_HTTPS_URL" ] && [[ $GITHUB_TOKEN ]]; then
+	if [[ $URL == https://* ]] && [[ $GITHUB_TOKEN ]]; then
 		local CREDS=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64)
 		git config http.extraHeader "Authorization: basic $CREDS"
-	else
-		git config --unset http.extraHeader
 	fi
 }
 
-guess_project() {
-	local GPROJECT=
+guess_repo() {
 	local GURL=$(git config --get remote.origin.url)
-	if [ "$GURL" == "$CHROMIUM_ORIG_HTTPS_URL" ] || \
-	   [ "$GURL" == "$CHROMIUM_GITHUB_HTTPS_URL" ] || \
-	   [ "$GURL" == "$CHROMIUM_GITHUB_SSH_URL" ]; then
-		GPROJECT=chromium
-	elif [ "$GURL" == "$TEMPEST_HTTPS_URL" ] || \
-	     [ "$GURL" == "$TEMPEST_SSH_URL" ]; then
-		GPROJECT=tempest
-	else
-		echo Error: unknown project $GURL
-		exit 1
+	local GREPO=${GURL#git@github.com:}
+	GREPO=${GREPO#https://github.com/}
+	if [ "$REPO" != "$GREPO" ]; then
+		[[ $REPO ]] && echo "Error: repo mismatch $REPO vs $GREPO ($URL vs $GURL)" && exit 1
+		REPO=$GREPO
+		URL=$GURL
 	fi
-
-	if [ -z "$PROJECT" ]; then
-		PROJECT=$GPROJECT
-	else
-		[ "$PROJECT" != "$GPROJECT" ] && echo "Error: project mismatch $PROJECT vs $GPROJECT ($URL vs $GURL)" && exit 1
-	fi
-
-	URL=$GURL
 	set_git_cfg
 }
 
 clone_ref_repo() {
-	[ -z "$URL" ] && echo Error: project not defined && usage
+	[ -z "$URL" ] && echo Error: repo not defined && usage
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to clone && usage
 	mkdir -p "$REF_DIR"
 	pushd "$REF_DIR"
@@ -60,14 +39,15 @@ clone_ref_repo() {
 }
 
 update_ref_repo() {
+	[ -z "$REF_DIR" ] && echo Error: reference dir required to update && usage
 	pushd "$REF_DIR"
-	guess_project
+	guess_repo
 	git fetch --prune --prune-tags --tags
 	popd > /dev/null
 }
 
 clone_target_repo() {
-	[ -z "$URL" ] && echo Error: project not defined && usage
+	[ -z "$URL" ] && echo Error: repo not defined && usage
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to clone && usage
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to clone && usage
 	ABS_REF_DIR=$(realpath "$REF_DIR")
@@ -82,10 +62,10 @@ clone_target_repo() {
 }
 
 update_target_repo() {
-	ABS_REF_DIR=
+	[ -z "$TARGET_DIR" ] && echo Error: target dir required to update && usage
 	[[ $REF_DIR ]] && ABS_REF_DIR=$(realpath "$REF_DIR")
 	pushd "$TARGET_DIR"
-	guess_project
+	guess_repo
 	if [ -s .git/objects/info/alternates ]; then
 		GREF_DIR=$(dirname `cat .git/objects/info/alternates`)
 		if [ "$ABS_REF_DIR" != "$GREF_DIR" ]; then
@@ -123,16 +103,16 @@ checkout() {
 
 [ $# -eq 0 ] && usage
 
-PROJECT=
+REPO=
 REF_DIR=
 TARGET_DIR=
 TARGET_REF=
 CLEAN=
 while [[ $# -gt 0 ]]; do
-	case $1 in
-		--project)
-			[ -z "$2" ] && echo Error: --project requires an argument && usage
-			PROJECT=$2
+	case "$1" in
+		--repo)
+			[ -z "$2" ] && echo Error: --repo requires an argument && usage
+			REPO=$2
 			shift 2
 			;;
 		--ref-dir)
@@ -168,24 +148,14 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-URL=
-case "$PROJECT" in
-	chromium)
-		URL=$CHROMIUM_ORIG_HTTPS_URL
-		;;
-	tempest)
-		if [[ $GITHUB_TOKEN ]]; then
-			URL=$TEMPEST_HTTPS_URL
-		else
-			URL=$TEMPEST_SSH_URL
-		fi
-		;;
-	"")
-		;;
-	*)
-		usage
-		;;
-esac
+if [[ $REPO ]]; then
+	[[ ! $REPO == *.git ]] && REPO=$REPO.git
+	if [[ $GITHUB_TOKEN ]]; then
+		URL=https://github.com/$REPO
+	else
+		URL=git@github.com:$REPO
+	fi
+else
 
 if [ -z "$REF_DIR" ]; then
 	:
