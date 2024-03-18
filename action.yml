@@ -16,7 +16,9 @@ inputs:
   path:
     description: 'Relative path under GITHUB_WORKSPACE to place the repository'
   ref:
-    description: 'The branch, tag or SHA to checkout'
+    description: |
+      A branch, tag or SHA to checkout
+      Default: github.ref_name
   clean:
     description: 'Whether to clean working directory or not'
     default: true
