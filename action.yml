@@ -2,11 +2,11 @@ name: 'Checkout'
 description: 'Checkout a Git repo using --reference'
 inputs:
   repository:
-    description: >
+    description: |
       GitHub full repo name
-      Default: ${{ github.repository }}
+      Default: ${github.repository}
   common-path:
-    description: >
+    description: |
       Common (reference) git repo path under $GITHUB_WORKSPACE
       Default: ${repository}.git
   path:
