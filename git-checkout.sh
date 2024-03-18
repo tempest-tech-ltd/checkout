@@ -87,6 +87,10 @@ update_target_repo() {
 clean() {
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to clean && usage
 	cd "$TARGET_DIR"
+	if git status 2>&1 | grep -q 'No commits yet'; then
+		cd - > /dev/null
+		return
+	fi
 	git clean -dffx
 	git reset --hard HEAD
 	cat <<EOF
@@ -173,11 +177,10 @@ if [ -z "$TARGET_DIR" ]; then
 	:
 elif [ -d "$TARGET_DIR" ]; then
 	update_target_repo
+	[ "$CLEAN" ] && clean
 else
 	clone_target_repo
 fi
-
-[ "$CLEAN" ] && clean
 
 [ "$TARGET_REF" ] && checkout
 
