@@ -17,5 +17,30 @@ inputs:
     description: 'Whether to clean working directory or not'
     default: true
 runs:
-  using: 'node20'
-  main: 'index.js'
+  using: 'composite'
+  steps:
+    - shell: bash
+      run: |
+        REPO=${{ inputs.repository }}
+        REF_DIR=${{ inputs.common-path }}
+        TARGET_DIR=${{ inputs.path }}
+        TARGET_REF=${{ inputs.ref }}
+        CLEAN=${{ inputs.clean }}
+
+        GITHUB_REF=${{ github.ref_name }}
+        GITHUB_ACTION_PATH=${{ github.action_path }}
+
+        REPO=${REPO:-$GITHUB_REPOSITORY}
+        REF_DIR=${REF_DIR:-$REPO.git}
+        TARGET_REF=${TARGET_REF:-$GITHUB_REF}
+        [ ! "$TARGET_DIR" ] && CLEAN=
+
+        CMD="$SHELL $GITHUB_ACTION_PATH/git-checkout.sh --debug --repo \"$REPO\" --ref-dir \"$REF_DIR\""
+        [ "$TARGET_DIR" ] && CMD="$CMD --target-dir \"$TARGET_DIR\""
+        [ "$TARGET_REF" ] && CMD="$CMD --target-ref \"$TARGET_REF\""
+        [ "$CLEAN" == "true" ] && CMD="$CMD --clean"
+        echo $CMD
+
+        $CMD
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
