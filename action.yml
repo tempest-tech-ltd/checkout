@@ -5,6 +5,11 @@ inputs:
     description: |
       GitHub full repo name
       Default: ${github.repository}
+  token:
+    description: |
+      A token to fetch the repository.
+      Typically, you would use ${{ secrets.GITHUB_TOKEN }}
+    required: true
   common-path:
     description: |
       Common (reference) git repo path under $GITHUB_WORKSPACE
@@ -43,4 +48,4 @@ runs:
 
         $CMD
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ inputs.token }}
