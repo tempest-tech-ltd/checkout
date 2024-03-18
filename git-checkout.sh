@@ -89,6 +89,11 @@ clean() {
 	cd "$TARGET_DIR"
 	git clean -dffx
 	git reset --hard HEAD
+	cat <<EOF
+	Note: The next command may produce error and warning messages due to
+	the nature of submodule deinitialization.
+	This is expected behavior and _usually_ does not indicate a problem.
+EOF
 	git submodule deinit --force --all
 	[ "$(git status --porcelain)" ] && echo Clean failed && exit 1
 	cd - > /dev/null
