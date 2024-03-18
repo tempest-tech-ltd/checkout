@@ -4,18 +4,17 @@ inputs:
   repository:
     description: |
       GitHub full repo name
-      Default: ${github.repository}
+      Default: GITHUB_REPOSITORY
   token:
     description: |
       A token to fetch the repository.
-      Typically, you would use ${{ secrets.GITHUB_TOKEN }}
-    required: true
+      Typically, you would use GITHUB_TOKEN
   common-path:
     description: |
-      Common (reference) git repo path under $GITHUB_WORKSPACE
+      Common (reference) git repo path under GITHUB_WORKSPACE
       Default: ${repository}.git
   path:
-    description: 'Relative path under $GITHUB_WORKSPACE to place the repository'
+    description: 'Relative path under GITHUB_WORKSPACE to place the repository'
   ref:
     description: 'The branch, tag or SHA to checkout'
   clean:
