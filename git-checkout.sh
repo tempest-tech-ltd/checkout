@@ -99,6 +99,7 @@ clean() {
 	This is expected behavior and _usually_ does not indicate a problem.
 EOF
 	git submodule deinit --force --all
+	rm -fr .git/modules
 	[ "$(git status --porcelain)" ] && echo Clean failed && exit 1
 	cd - > /dev/null
 }
