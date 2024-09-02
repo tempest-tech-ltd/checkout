@@ -39,7 +39,7 @@ clone_ref_repo() {
 	git init --bare
 	git remote add origin "$URL"
 	set_git_cfg
-	git fetch --prune --prune-tags --tags
+	git fetch --prune --prune-tags --tags --force
 	cd - > /dev/null
 }
 
@@ -47,7 +47,7 @@ update_ref_repo() {
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to update && usage
 	cd "$REF_DIR"
 	guess_repo
-	git fetch --prune --prune-tags --tags
+	git fetch --prune --prune-tags --tags --force
 	cd - > /dev/null
 }
 
@@ -62,7 +62,7 @@ clone_target_repo() {
 	git remote add origin "$URL"
 	set_git_cfg
 	echo "$ABS_REF_DIR"/objects > .git/objects/info/alternates
-	git fetch --prune --prune-tags --tags
+	git fetch --prune --prune-tags --tags --force
 	cd - > /dev/null
 }
 
@@ -80,7 +80,7 @@ update_target_repo() {
 			update_ref_repo
 		fi
 	fi
-	git fetch --prune --prune-tags --tags
+	git fetch --prune --prune-tags --tags --force
 	cd "$SAVPWD"
 }
 
