@@ -1,11 +1,13 @@
-# checkout@v0
+# checkout@v1
 Fast and simple GitHub action to checkout large Git repos using --reference
 
 It also saves space significantly.
 
+Note: requires git version >= 2.35
+
 # Usage
 ```yaml
-- uses: tempest-tech-ltd/checkout@v0
+- uses: tempest-tech-ltd/checkout@v1
   with:
     # GitHub full repository name (with owner). For example, tempest-tech-ltd/checkout
     # Default:
@@ -36,7 +38,7 @@ It also saves space significantly.
 
 ## Typical checkout
 ```yaml
-- uses: tempest-tech-ltd/checkout@v0
+- uses: tempest-tech-ltd/checkout@v1
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
     path: ${{ github.ref_name }}/src
@@ -44,7 +46,7 @@ It also saves space significantly.
 
 ## Checkout another branch keeping changes
 ```yaml
-- uses: tempest-tech-ltd/checkout@v0
+- uses: tempest-tech-ltd/checkout@v1
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
     path: abranch-src
@@ -54,14 +56,14 @@ It also saves space significantly.
 
 ## Fetch or update reference (common) git directory only
 ```yaml
-- uses: tempest-tech-ltd/checkout@v0
+- uses: tempest-tech-ltd/checkout@v1
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## Fetch or update reference (common) git directory only of a public project
 ```yaml
-- uses: tempest-tech-ltd/checkout@v0
+- uses: tempest-tech-ltd/checkout@v1
   with:
     repository: chromium/chromium
 ```
