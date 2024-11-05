@@ -47,7 +47,7 @@ update_ref_repo() {
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to update && usage
 	cd "$REF_DIR"
 	guess_repo
-	git fetch --prune --prune-tags --tags --force
+	git -c gc.auto=0 fetch --prune --prune-tags --tags --force
 	cd - > /dev/null
 }
 
