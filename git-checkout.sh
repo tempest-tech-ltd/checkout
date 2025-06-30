@@ -43,11 +43,19 @@ clone_ref_repo() {
 	cd - > /dev/null
 }
 
+fetch_pr_ref() {
+	if [[ "$TARGET_REF" == refs/pull/*/merge || "$TARGET_REF" == refs/pull/*/head ]]; then
+		pr_part="${TARGET_REF#refs/pull/}"
+		git fetch origin "+$TARGET_REF:refs/remotes/pull/$pr_part"
+	fi
+}
+
 update_ref_repo() {
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to update && usage
 	cd "$REF_DIR"
 	guess_repo
 	git -c gc.auto=0 fetch --prune --prune-tags --tags --force
+	fetch_pr_ref
 	cd - > /dev/null
 }
 
@@ -63,6 +71,7 @@ clone_target_repo() {
 	set_git_cfg
 	echo "$ABS_REF_DIR"/objects > .git/objects/info/alternates
 	git fetch --prune --prune-tags --tags --force
+	fetch_pr_ref
 	cd - > /dev/null
 }
 
@@ -81,6 +90,7 @@ update_target_repo() {
 		fi
 	fi
 	git fetch --prune --prune-tags --tags --force
+	fetch_pr_ref
 	cd "$SAVPWD"
 }
 
@@ -108,11 +118,25 @@ checkout() {
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to checkout && usage
 	[ -z "$TARGET_REF" ] && echo Error: target ref required to checkout && usage
 	cd "$TARGET_DIR"
-	if [ "$(git branch --remotes --list origin/$TARGET_REF)" ]; then
-		git checkout -B $TARGET_REF origin/$TARGET_REF
+
+	if [[ "$TARGET_REF" == refs/pull/*/merge || "$TARGET_REF" == refs/pull/*/head ]]; then
+		pr_part="${TARGET_REF#refs/pull/}"
+		git checkout --force -B "$TARGET_REF" "refs/remotes/pull/$pr_part"
 	else
-		git checkout $TARGET_REF
+
+		if [[ "$TARGET_REF" == refs/heads/* ]]; then
+			TARGET_REF="${TARGET_REF#refs/heads/}"
+		elif [[ "$TARGET_REF" == refs/tags/* ]]; then
+			TARGET_REF="${TARGET_REF#refs/tags/}"
+		fi
+
+		if [ "$(git branch --remotes --list origin/$TARGET_REF)" ]; then
+			git checkout -B $TARGET_REF origin/$TARGET_REF
+		else
+			git checkout $TARGET_REF
+		fi
 	fi
+
 	cd - > /dev/null
 }
 
