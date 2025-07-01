@@ -15,11 +15,20 @@ abs_path() {
 	fi
 }
 
+add_refspec() {
+	local spec="$1"
+	if ! git config --get-all remote.origin.fetch | grep -Fqx "$spec"; then
+		git config --add remote.origin.fetch "$spec"
+	fi
+}
+
 set_git_cfg() {
 	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
 		CREDS=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64)
 		git config http.extraHeader "Authorization: basic $CREDS"
 	fi
+	add_refspec '+refs/pull/*/head:refs/remotes/origin/pull/*/head'
+	add_refspec '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge'
 }
 
 guess_repo() {
