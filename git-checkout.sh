@@ -24,7 +24,7 @@ add_refspec() {
 
 set_git_cfg() {
 	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
-		CREDS=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64 -w 0)
+		CREDS=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')
 		git config http.extraHeader "Authorization: basic $CREDS"
 	fi
 	add_refspec '+refs/pull/*/head:refs/remotes/origin/pull/*/head'
