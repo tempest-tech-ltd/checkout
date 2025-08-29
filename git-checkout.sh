@@ -89,19 +89,30 @@ update_target_repo() {
 			update_ref_repo
 		fi
 	fi
-	git fetch --prune --prune-tags --tags --force
+	git fetch --prune --prune-tags --tags --force --recurse-submodules=no
 	cd "$SAVPWD"
 }
 
 clean() {
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to clean && usage
 	cd "$TARGET_DIR"
-	if git status 2>&1 | grep -q 'No commits yet'; then
-		cd - > /dev/null
-		return
+
+	git merge --abort  >/dev/null 2>&1 || true
+	git rebase --abort >/dev/null 2>&1 || true
+	git cherry-pick --abort >/dev/null 2>&1 || true
+	git revert --abort >/dev/null 2>&1 || true
+	git am --abort >/dev/null 2>&1 || true
+	git bisect reset >/dev/null 2>&1 || true
+
+	if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+		git read-tree --empty
 	fi
 	git clean -dffx
-	git reset --hard HEAD
+	if git rev-parse --verify HEAD >/dev/null 2>&1; then
+		git reset --hard HEAD
+	fi
+
+	git submodule foreach 'cd "$toplevel" && rm -fr -- "$sm_path"'
 	cat <<EOF
 	Note: The next command may produce error and warning messages due to
 	the nature of submodule deinitialization.
@@ -109,7 +120,8 @@ clean() {
 EOF
 	git submodule deinit --force --all
 	rm -fr .git/modules
-	[ "$(git status --porcelain)" ] && echo Clean failed && exit 1
+
+	[ "$(git status --porcelain --ignored)" ] && echo Clean failed && exit 1
 	cd - > /dev/null
 }
 
