@@ -41,6 +41,16 @@ runs:
         [ "$TARGET_DIR" ] && TARGET_REF=${TARGET_REF:-$GITHUB_REF}
         [ ! "$TARGET_DIR" ] && CLEAN=
 
+        try_remove_locks() {
+          local dir="$1"
+          if [ -d "$dir" ]; then
+            rm -f "$dir/index.lock" "$dir/HEAD.lock" "$dir/config.lock" || true
+          fi
+        }
+
+        try_remove_locks "$REF_DIR"
+        [ "$TARGET_DIR" ] && try_remove_locks "$TARGET_DIR/.git"
+
         CMD="bash '$GITHUB_ACTION_PATH'/git-checkout.sh --debug --repo 'https://github.com/$REPO' --ref-dir '$REF_DIR'"
         [ "$TARGET_DIR" ] && CMD="$CMD --target-dir '$TARGET_DIR'"
         [ "$TARGET_REF" ] && CMD="$CMD --target-ref '$TARGET_REF'"
