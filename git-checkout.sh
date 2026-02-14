@@ -15,6 +15,22 @@ abs_path() {
 	fi
 }
 
+gitm() {
+	local retries=5
+	local delay=2
+	local count=0
+	while [ $count -lt $retries ]; do
+		if git "$@"; then
+			return 0
+		fi
+		echo "Git command failed. Retrying in ${delay}s..."
+		sleep $delay
+		count=$((count + 1))
+		delay=$((delay * 2))
+	done
+	return 1
+}
+
 add_refspec() {
 	local spec="$1"
 	if ! git config --get-all remote.origin.fetch | grep -Fqx "$spec"; then
@@ -48,7 +64,7 @@ clone_ref_repo() {
 	git init --bare
 	git remote add origin "$URL"
 	set_git_cfg
-	git fetch --prune --prune-tags --tags --force
+	gitm fetch --prune --prune-tags --tags --force
 	cd - > /dev/null
 }
 
@@ -56,7 +72,7 @@ update_ref_repo() {
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to update && usage
 	cd "$REF_DIR"
 	guess_repo
-	git -c gc.auto=0 fetch --prune --prune-tags --tags --force
+	gitm -c gc.auto=0 fetch --prune --prune-tags --tags --force
 	cd - > /dev/null
 }
 
@@ -71,7 +87,7 @@ clone_target_repo() {
 	git remote add origin "$URL"
 	set_git_cfg
 	echo "$ABS_REF_DIR"/objects > .git/objects/info/alternates
-	git fetch --prune --prune-tags --tags --force
+	gitm fetch --prune --prune-tags --tags --force
 	cd - > /dev/null
 }
 
@@ -89,7 +105,7 @@ update_target_repo() {
 			update_ref_repo
 		fi
 	fi
-	git fetch --prune --prune-tags --tags --force --recurse-submodules=no
+	gitm fetch --prune --prune-tags --tags --force --recurse-submodules=no
 	cd "$SAVPWD"
 }
 
