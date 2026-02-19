@@ -9,7 +9,8 @@ Note: requires git version >= 2.35
 ```yaml
 - uses: tempest-tech-ltd/checkout@v2
   with:
-    # GitHub full repository name (with owner). For example, tempest-tech-ltd/checkout
+    # GitHub repository name (with owner) or direct Git repository URL
+    # Examples: tempest-tech-ltd/checkout, https://git.example.com/repo.git
     # Default:
     repository: ${{ github.repository }}
 
@@ -66,6 +67,14 @@ Note: requires git version >= 2.35
 - uses: tempest-tech-ltd/checkout@v2
   with:
     repository: chromium/chromium
+```
+
+## Checkout from a direct Git URL
+```yaml
+- uses: tempest-tech-ltd/checkout@v2
+  with:
+    repository: https://git.example.com/my-repo.git
+    path: my-repo-src
 ```
 
 ## Checkout multiple repos and Push commits
