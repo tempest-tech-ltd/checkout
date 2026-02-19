@@ -40,7 +40,33 @@ runs:
         [ "$TARGET_DIR" ] && TARGET_REF=${TARGET_REF:-$GITHUB_REF}
         [ ! "$TARGET_DIR" ] && CLEAN=
 
-        if [[ "$REPO" == https://* ]]; then
+        # Validate and sanitize repository URL
+        validate_url() {
+          local url="$1"
+          
+          # Check for allowed protocols (https, http, git)
+          if [[ ! "$url" =~ ^(https?|git):// ]]; then
+            echo "Error: Invalid protocol. Only https://, http://, and git:// are allowed."
+            exit 1
+          fi
+          
+          # Check for basic URL format validation
+          # Ensure no dangerous characters that could lead to command injection
+          if [[ "$url" =~ [\;\|\&\$\`\(\)\<\>] ]]; then
+            echo "Error: URL contains potentially dangerous characters."
+            exit 1
+          fi
+          
+          # Validate URL structure - should have a domain/host after protocol
+          # Allow alphanumeric, dots, hyphens in hostname, optional port, and safe path characters
+          if [[ ! "$url" =~ ^(https?|git)://[a-zA-Z0-9][a-zA-Z0-9\.\-]+(:[0-9]+)?(/[^[:space:]]+)?$ ]]; then
+            echo "Error: URL format is invalid. Expected format: protocol://host[:port][/path]"
+            exit 1
+          fi
+        }
+
+        if [[ "$REPO" == https://* ]] || [[ "$REPO" == http://* ]] || [[ "$REPO" == git://* ]]; then
+          validate_url "$REPO"
           REPO_URL="$REPO"
           SAFE_REPO_NAME="${REPO#*://}"
         else
