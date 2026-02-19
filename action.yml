@@ -37,9 +37,18 @@ runs:
         GITHUB_ACTION_PATH='${{ github.action_path }}'
 
         REPO=${REPO:-$GITHUB_REPOSITORY}
-        REF_DIR=${REF_DIR:-$REPO.git}
         [ "$TARGET_DIR" ] && TARGET_REF=${TARGET_REF:-$GITHUB_REF}
         [ ! "$TARGET_DIR" ] && CLEAN=
+
+        if [[ "$REPO" == https://* ]]; then
+          REPO_URL="$REPO"
+          SAFE_REPO_NAME="${REPO#*://}"
+        else
+          REPO_URL="https://github.com/$REPO"
+          SAFE_REPO_NAME="$REPO"
+        fi
+
+        REF_DIR=${REF_DIR:-$SAFE_REPO_NAME.git}
 
         try_remove_locks() {
           local dir="$1"
@@ -51,7 +60,7 @@ runs:
         try_remove_locks "$REF_DIR"
         [ "$TARGET_DIR" ] && try_remove_locks "$TARGET_DIR/.git"
 
-        CMD="bash '$GITHUB_ACTION_PATH'/git-checkout.sh --debug --repo 'https://github.com/$REPO' --ref-dir '$REF_DIR'"
+        CMD="bash '$GITHUB_ACTION_PATH'/git-checkout.sh --debug --repo '$REPO_URL' --ref-dir '$REF_DIR'"
         [ "$TARGET_DIR" ] && CMD="$CMD --target-dir '$TARGET_DIR'"
         [ "$TARGET_REF" ] && CMD="$CMD --target-ref '$TARGET_REF'"
         [ "$CLEAN" == "true" ] && CMD="$CMD --clean"
