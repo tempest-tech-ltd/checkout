@@ -33,6 +33,12 @@ Note: requires git version >= 2.35
     # Whether to clean working directory or not
     # Default:
     clean: true
+
+    # Retry a checkout refused because of leftovers from an interrupted run,
+    # discarding conflicting local changes and untracked files
+    # (other untracked content is kept)
+    # Default:
+    force: false
 ```
 
 # Scenarios
@@ -53,6 +59,18 @@ Note: requires git version >= 2.35
     path: abranch-src
     ref: abranch
     clean: false
+```
+
+## Unattended CI checkout into a reused working tree
+Self-heals after an interrupted previous run (killed runner, full disk)
+without the cost of a full clean:
+```yaml
+- uses: tempest-tech-ltd/checkout@v2
+  with:
+    token: ${{ secrets.GITHUB_TOKEN }}
+    path: ${{ github.ref_name }}/src
+    clean: false
+    force: true
 ```
 
 ## Fetch or update reference (common) git directory only
