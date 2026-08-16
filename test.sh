@@ -163,7 +163,7 @@ printf '#!/bin/sh\necho "RM $*" >&2\n' > "$T/fakerm/rm"; chmod +x "$T/fakerm/rm"
 OUT=$(cd "$W" && PATH="$T/fakerm:$PATH" "$SH" "$SCRIPT" --repo "$T/origin.git" \
     --ref-dir ref.git --target-dir /tmp/.. --target-ref main 2>&1); RC=$?
 hasnt "a target dir resolving to the root is refused" "RM -rf /tmp/../.git"
-has  "  and says so" "refusing to recover unsafe target dir"
+has  "  and says so" "unsafe repository directory"
 
 # --- a wrong repository is a caller mistake, never repaired ------------
 git -c init.defaultBranch=main init -q --bare "$T/other.git"
@@ -201,6 +201,57 @@ else
 fi
 printf '#!/bin/sh\ncase " $* " in *" fetch "*) [ -f "$FAIL_FETCH" ] && { echo "fatal: simulated fetch failure" >&2; exit 128; } ;; esac\nexec git_real "$@"\n' > "$T/fakebin/git"
 RUN "$W" "${ARGS[@]}"
+
+# --- repair must never rebind a store to another repository ------------
+git -c init.defaultBranch=main init -q --bare "$T/foreign.git"
+rm -rf "$W/refX.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refX.git;   rc_is "prep: a second reference dir" 0
+rm "$W/refX.git/HEAD"
+RUN "$W" --repo "$T/foreign.git" --ref-dir refX.git
+[ "$RC" != 0 ] && ok "a damaged reference dir is not rebound to another repo" || bad "a damaged reference dir is not rebound to another repo (rc=$RC)"
+is  "  and keeps its origin" "$T/origin.git" "$(git config --file "$W/refX.git/config" --get remote.origin.url)"
+
+rm -rf "$W/wt"; git -c init.defaultBranch=main init -q "$W/wt"
+RUN "$W" --repo "$T/origin.git" --ref-dir wt
+[ "$RC" != 0 ] && ok "a work tree passed as the reference dir is refused" || bad "a work tree passed as the reference dir is refused (rc=$RC)"
+
+# --- filesystem roots are refused before anything is touched -----------
+rm -rf "$T/fakerm2"; mkdir -p "$T/fakerm2"
+printf '#!/bin/sh\necho "RM $*" >&2\n' > "$T/fakerm2/rm"; chmod +x "$T/fakerm2/rm"
+for ROOT in / //; do
+    OUT=$(cd "$W" && PATH="$T/fakerm2:$PATH" "$SH" "$SCRIPT" --repo "$T/origin.git" \
+        --ref-dir ref.git --target-dir "$ROOT" --target-ref main 2>&1); RC=$?
+    hasnt "target dir '$ROOT' touches nothing" "RM "
+    has  "  and is refused" "unsafe repository directory"
+    OUT=$(cd "$W" && "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir "$ROOT" 2>&1); RC=$?
+    has  "reference dir '$ROOT' is refused" "unsafe repository directory"
+done
+
+# --- a tag and a branch may share a name -------------------------------
+cd "$T/seed"; git checkout -q main; echo tagged > a; git commit -qam tagcommit
+git tag shared; git push -q "$T/origin.git" refs/tags/shared
+echo branched > a; git commit -qam branchcommit
+git push -q "$T/origin.git" HEAD:refs/heads/shared; git checkout -q main; cd /
+rm -rf "$W/srcT"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcT --target-ref refs/tags/shared
+rc_is "a full tag ref" 0
+is  "  checks out the tag, not the branch" tagged "$(cat "$W/srcT/a")"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcT --target-ref refs/heads/shared
+rc_is "a full branch ref" 0
+is  "  checks out the branch" branched "$(cat "$W/srcT/a")"
+
+# --- a target that stopped sharing the object store --------------------
+rm -rf "$W/srcA"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcA --target-ref main
+rc_is "prep: a target with alternates" 0
+rm "$W/srcA/.git/objects/info/alternates"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcA --target-ref main
+rc_is "a target that lost its alternates" 0
+[ -s "$W/srcA/.git/objects/info/alternates" ] && ok "  borrows from the store again" || bad "  borrows from the store again"
+
+# --- a caller mistake must say why -------------------------------------
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref no-such-ref-at-all
+has "an unknown ref explains itself" "target ref does not exist"
 
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"

@@ -41,6 +41,22 @@ objects_dir() {
 
 # --- validation: never changes anything -----------------------------------
 
+# A filesystem root is never a repository dir, and every path here ends up
+# under an rm or a git init. Checked once, before anything is touched, and
+# for both dirs - not as a property of one recovery function. Absolute paths
+# outside the workspace stay allowed: on Windows the default workspace is
+# too deep for a chromium checkout, so ours live elsewhere on purpose.
+check_safe_dir() {
+	[ -d "$1" ] || return 0
+	DIR_ABS=$(abs_path "$1")
+	case "$DIR_ABS" in
+		"" | / | // | ?:[/\\] | ?:[/\\][/\\] )
+			echo "Error: unsafe repository directory: '$1'" >&2
+			return $RC_INVALID ;;
+	esac
+	return 0
+}
+
 # The two dirs are checked apart: only a work tree can be checked out, and
 # alternates must name the reference repo's own object store.
 is_repo() {
@@ -51,6 +67,21 @@ is_bare_repo() {
 	is_repo "$1" . && [ "$(git -C "$1" rev-parse --is-bare-repository 2>/dev/null)" = true ]
 }
 
+# Reads the config file directly, so a repo too damaged for git to open still
+# gets its identity checked. Repair must never be a way to rebind a store
+# that other checkouts borrow objects from.
+check_stored_identity() {
+	[ -f "$1/config" ] || [ -f "$1/.git/config" ] || return $RC_DAMAGE
+	CFG=$1/config
+	[ -f "$CFG" ] || CFG=$1/.git/config
+	CURRENT=$(git config --file "$CFG" --get remote.origin.url 2>/dev/null || true)
+	[ -z "$CURRENT" ] && return $RC_DAMAGE
+	[ -z "$URL" ] && URL=$CURRENT && return 0
+	[ "$CURRENT" = "$URL" ] && return 0
+	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
+	return $RC_INVALID
+}
+
 # RC_INVALID when the repo belongs to a different remote: rebinding it would
 # point every checkout sharing this store at another project.
 check_identity() {
@@ -58,7 +89,7 @@ check_identity() {
 	[ -z "$CURRENT" ] && return $RC_DAMAGE
 	[ -z "$URL" ] && URL=$CURRENT && return 0
 	[ "$CURRENT" = "$URL" ] && return 0
-	echo "Error: $1 belongs to $CURRENT, not to $URL"
+	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
 	return $RC_INVALID
 }
 
@@ -66,13 +97,16 @@ check_identity() {
 # Rebuilding a repo root out of the alternates entry - what this used to do -
 # broke on any path holding a space.
 check_alternates() {
-	ALT=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)/objects/info/alternates
-	[ -s "$ALT" ] || return 0
 	[ -z "$REF_DIR" ] && return 0
+	ALT=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)/objects/info/alternates
+	# Without it the target silently stops sharing the object store and
+	# refetches everything into itself - correct content, but none of the
+	# disk and time this action exists for.
+	[ -s "$ALT" ] || return $RC_DAMAGE
 	BORROWED=$(cat "$ALT") || return $RC_DAMAGE
 	EXPECTED=$(objects_dir "$REF_DIR") || return $RC_DAMAGE
 	[ "$BORROWED" = "$EXPECTED" ] && return 0
-	echo "Error: $1 borrows objects from $BORROWED, not from $EXPECTED"
+	echo "Error: $1 borrows objects from $BORROWED, not from $EXPECTED" >&2
 	return $RC_INVALID
 }
 
@@ -156,6 +190,15 @@ create_ref_repo() {
 # deleted: every target borrowing from it would lose its objects.
 ensure_ref_repo() {
 	[ -d "$1" ] || { create_ref_repo "$1"; return $?; }
+	# A worktree is not a reference repo: alternates would name a directory
+	# that does not exist, and the cache would silently do nothing.
+	if [ -e "$1/.git" ]; then
+		echo "Error: $1 is a work tree, not a bare repository" >&2
+		return $RC_INVALID
+	fi
+	# Identity first, so a repo too damaged to open cannot be rebound.
+	RC=0; check_stored_identity "$1" || RC=$?
+	[ "$RC" -eq "$RC_INVALID" ] && return $RC
 	if is_bare_repo "$1"; then
 		RC=0; check_identity "$1" || RC=$?
 		[ "$RC" -eq "$RC_INVALID" ] && return $RC
@@ -244,26 +287,40 @@ EOF
 	return $RC_DAMAGE
 }
 
-# Only the three shapes the action documents. A bare name must not fall
-# through to refs/heads/: a local branch outlives the remote one that created
-# it, and checking that out would quietly build a deleted branch.
+# A full ref keeps its type end to end: refs/tags/x and refs/heads/x are
+# different things that share a name, and guessing between them once built a
+# branch for a tag workflow. A bare name is still accepted for callers who
+# pass one, and must not fall through to refs/heads/ - a local branch outlives
+# the remote one that created it, and checking that out would quietly build a
+# deleted branch.
 resolve_ref() {
-	if git -C "$1" show-ref --verify --quiet "refs/remotes/origin/$2"; then
-		echo "refs/remotes/origin/$2"
-		return 0
-	fi
-	if git -C "$1" show-ref --verify --quiet "refs/tags/$2"; then
-		echo "refs/tags/$2"
-		return 0
-	fi
 	case "$2" in
-		"" | *[!0-9a-fA-F]* ) ;;
-		* ) if git -C "$1" rev-parse --verify --quiet "$2^{commit}" >/dev/null 2>&1; then
-			echo "$2"
-			return 0
-		fi ;;
+		refs/heads/* )
+			git -C "$1" show-ref --verify --quiet "refs/remotes/origin/${2#refs/heads/}" &&
+				{ echo "refs/remotes/origin/${2#refs/heads/}"; return 0; } ;;
+		refs/tags/* )
+			git -C "$1" show-ref --verify --quiet "$2" && { echo "$2"; return 0; } ;;
+		refs/pull/* )
+			git -C "$1" show-ref --verify --quiet "refs/remotes/origin/${2#refs/}" &&
+				{ echo "refs/remotes/origin/${2#refs/}"; return 0; } ;;
+		* )
+			if git -C "$1" show-ref --verify --quiet "refs/remotes/origin/$2"; then
+				echo "refs/remotes/origin/$2"
+				return 0
+			fi
+			if git -C "$1" show-ref --verify --quiet "refs/tags/$2"; then
+				echo "refs/tags/$2"
+				return 0
+			fi
+			case "$2" in
+				"" | *[!0-9a-fA-F]* ) ;;
+				* ) if git -C "$1" rev-parse --verify --quiet "$2^{commit}" >/dev/null 2>&1; then
+					echo "$2"
+					return 0
+				fi ;;
+			esac ;;
 	esac
-	echo "Error: target ref does not exist: $2"
+	echo "Error: target ref does not exist: $2" >&2
 	return $RC_INVALID
 }
 
@@ -275,7 +332,8 @@ checkout() {
 	RESOLVED=$(resolve_ref "$1" "$2") || return $?
 	case "$RESOLVED" in
 		refs/remotes/origin/* )
-			git -C "$1" checkout --force -B "$2" "$RESOLVED" || return $RC_DAMAGE ;;
+			BRANCH=${RESOLVED#refs/remotes/origin/}
+			git -C "$1" checkout --force -B "$BRANCH" "$RESOLVED" || return $RC_DAMAGE ;;
 		* )
 			git -C "$1" checkout --force "$RESOLVED" || return $RC_DAMAGE ;;
 	esac
@@ -360,6 +418,11 @@ if [ "$TARGET_REF" ] && [ -z "$TARGET_DIR" ]; then
 	echo "Error: --target-ref requires --target-dir"
 	usage
 fi
+
+if [ "$REF_DIR" ]; then
+	check_safe_dir "$REF_DIR" || exit $?
+fi
+[ "$TARGET_DIR" ] && { check_safe_dir "$TARGET_DIR" || exit $?; }
 
 if [ "$REF_DIR" ]; then
 	ensure_ref_repo "$REF_DIR" || exit $?

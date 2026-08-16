@@ -18,17 +18,22 @@ Note: requires git version >= 2.35
     # Default:
     token: null
 
-    # Common (reference) git repository path under GITHUB_WORKSPACE
+    # Common (reference) git repository path, relative to GITHUB_WORKSPACE or
+    # absolute. An absolute path outside the workspace is supported.
     # Default:
     common-path: ${repository}.git
 
-    # Relative path under GITHUB_WORKSPACE to place the repository
+    # Where to place the repository, relative to GITHUB_WORKSPACE or absolute.
+    # An absolute path outside the workspace is supported - on Windows the
+    # default workspace can be too deep for a large checkout.
     # Default:
     path: null
 
-    # A branch, tag or SHA to checkout
-    # Default (if path is not null):
-    ref: ${{ github.ref_name }}
+    # A branch, tag, full ref (refs/tags/v1) or SHA to checkout. Pass a full
+    # ref when a branch and a tag share a name; a short name resolves to the
+    # branch.
+    # Default: the ref the workflow runs on
+    ref: null
 
     # Whether to clean working directory or not
     # Default:
@@ -66,7 +71,12 @@ objects from its store through alternates, and removing it would break every
 one of them.
 
 A ref that does not exist is treated as a caller mistake, not as damage - it
-fails without recreating anything.
+fails without recreating anything. So does a reference dir belonging to another
+repository: repair never rebinds a store that other checkouts borrow from.
+
+A reference dir must not be updated by two runs at once. Lock files left behind
+by an interrupted git are removed, which assumes the run owns that directory
+for its duration.
 
 # Scenarios
 
@@ -110,5 +120,6 @@ fails without recreating anything.
     path: my-repo-src
 ```
 
-## Checkout multiple repos and Push commits
-Should just work as expected.
+## Checkout multiple repos
+Should just work as expected. The token is used for fetching only and is not
+left in any repository config, so pushing needs credentials of its own.
