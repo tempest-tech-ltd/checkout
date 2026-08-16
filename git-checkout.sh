@@ -90,7 +90,7 @@ clone_ref_repo() {
 	mkdir -p "$REF_DIR"
 	cd "$REF_DIR"
 	git init --bare
-	git remote add origin "$URL"
+	git remote add origin "$URL" || git remote set-url origin "$URL"
 	set_git_cfg
 	gitm fetch --prune --prune-tags --tags --force
 	cd - > /dev/null
@@ -242,10 +242,7 @@ if [ -z "$REF_DIR" ]; then
 elif [ -d "$REF_DIR" ] && is_valid_repo "$REF_DIR"; then
 	update_ref_repo
 else
-	if [ -d "$REF_DIR" ]; then
-		echo "Warning: $REF_DIR is not a valid git repo, removing it and recloning"
-		rm -rf "$REF_DIR"
-	fi
+	[ -d "$REF_DIR" ] && echo "Warning: $REF_DIR is not a valid git repo, reinitializing it in place (existing objects are kept)"
 	clone_ref_repo
 fi
 
@@ -262,6 +259,10 @@ else
 	fi
 	clone_target_repo
 	[ "$RECOVERED" ] && [ "$CLEAN" ] && clean
+fi
+
+if [ "$RECOVERED" ] && [ -z "$TARGET_REF" ] && [ -z "$CLEAN" ]; then
+	echo "Warning: $TARGET_DIR was recovered but no --target-ref was given; its preserved files stay untracked until a checkout (--force) reconciles them"
 fi
 
 [ "$TARGET_REF" ] && checkout
