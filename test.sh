@@ -124,7 +124,7 @@ has "  before touching anything" "requires --target-dir"
 mkdir -p "$T/fakebin"
 cat > "$T/fakebin/git" <<'EOF'
 #!/bin/sh
-[ "$1" = fetch ] && [ -f "$FAIL_FETCH" ] && { echo "fatal: simulated fetch failure" >&2; exit 128; }
+case " $* " in *" fetch "*) [ -f "$FAIL_FETCH" ] && { echo "fatal: simulated fetch failure" >&2; exit 128; } ;; esac
 exec git_real "$@"
 EOF
 chmod +x "$T/fakebin/git"
@@ -164,6 +164,51 @@ OUT=$(cd "$W" && PATH="$T/fakerm:$PATH" "$SH" "$SCRIPT" --repo "$T/origin.git" \
     --ref-dir ref.git --target-dir /tmp/.. --target-ref main 2>&1); RC=$?
 hasnt "a target dir resolving to the root is refused" "RM -rf /tmp/../.git"
 has  "  and says so" "refusing to recover unsafe target dir"
+
+# --- a wrong repository is a caller mistake, never repaired ------------
+git -c init.defaultBranch=main init -q --bare "$T/other.git"
+RUN "$W" --repo "$T/other.git" --ref-dir ref.git
+[ "$RC" != 0 ] && ok "a reference dir belonging to another repo is refused" || bad "a reference dir belonging to another repo is refused (rc=$RC)"
+is  "  and keeps its origin" "$T/origin.git" "$(git -C "$W/ref.git" config --get remote.origin.url)"
+
+# --- paths with spaces, twice ------------------------------------------
+SP="$T/ws two"; mkdir -p "$SP"
+SARGS=(--repo "$T/origin.git" --ref-dir "ref cache.git" --target-dir "src dir" --target-ref main)
+RUN "$SP" "${SARGS[@]}";                     rc_is "a path with a space, first run" 0
+RUN "$SP" "${SARGS[@]}";                     rc_is "a path with a space, second run" 0
+is  "  checks out the ref" five "$(cat "$SP/src dir/a")"
+
+# --- a stale HEAD must not pass for success ----------------------------
+cd "$T/seed"; echo six > a; git commit -qam c6; git push -q "$T/origin.git" main; cd /
+git -C "$W/src" config --unset-all remote.origin.fetch
+cat > "$T/fakebin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+  *" --add remote.origin.fetch +refs/heads/"*) echo "simulated config failure" >&2; exit 1 ;;
+esac
+exec git_real "$@"
+EOF
+OUT=$(cd "$W" && PATH="$T/fakebin:$PATH" "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+# Either it fails, or it repaired itself - but it must never report success
+# while HEAD sits on an older commit than the ref it was asked for.
+if [ "$RC" != 0 ]; then
+    ok "a heads refspec that cannot be restored does not pass silently"
+else
+    WANT=$(git -C "$T/seed" rev-parse HEAD)
+    HAVE=$(git -C "$W/src" rev-parse HEAD)
+    [ "$WANT" = "$HAVE" ] && ok "a heads refspec that cannot be restored does not pass silently" \
+        || bad "a heads refspec that cannot be restored does not pass silently (stale HEAD)"
+fi
+printf '#!/bin/sh\ncase " $* " in *" fetch "*) [ -f "$FAIL_FETCH" ] && { echo "fatal: simulated fetch failure" >&2; exit 128; } ;; esac\nexec git_real "$@"\n' > "$T/fakebin/git"
+RUN "$W" "${ARGS[@]}"
+
+# --- the token must not be left in any config --------------------------
+rm -rf "$W/src6" "$W/ref6.git"
+OUT=$(cd "$W" && GITHUB_TOKEN=ghs_TOKENVALUE "$SH" "$SCRIPT" --repo "$T/origin.git" \
+    --ref-dir ref6.git --target-dir src6 --target-ref main 2>&1); RC=$?
+rc_is "a run with a token" 0
+is  "  leaves nothing in the reference config" "" "$(git -C "$W/ref6.git" config --get-all http.extraHeader || true)"
+is  "  nor in the target config" "" "$(git -C "$W/src6" config --get-all http.extraHeader || true)"
 
 # --- the token must not reach an xtrace log ----------------------------
 rm -rf "$W/src5"
