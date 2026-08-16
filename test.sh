@@ -32,7 +32,7 @@ cd /
 W=$T/ws; mkdir -p "$W"
 ARGS=(--repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref main)
 RECOVER="Warning: recovering"
-REPAIR="is not a valid git repo"
+REPAIR="reinitializing it in place"
 
 echo "# checkout under $SH ($("$SH" -c 'echo $0') / git $(git --version | awk '{print $3}'))"
 
@@ -89,7 +89,7 @@ RUN "$W" "${ARGS[@]}"
 OBJ_BEFORE=$(find "$W/ref.git/objects" -type f | wc -l)
 rm "$W/ref.git/HEAD"
 RUN "$W" "${ARGS[@]}";                       rc_is "a damaged reference dir" 0
-has "  is repaired in place" "ref.git $REPAIR"
+has "  is repaired in place" "$REPAIR"
 OBJ_AFTER=$(find "$W/ref.git/objects" -type f | wc -l)
 [ "$OBJ_AFTER" -ge "$OBJ_BEFORE" ] && ok "  keeps its object store ($OBJ_BEFORE -> $OBJ_AFTER)" \
     || bad "  lost objects ($OBJ_BEFORE -> $OBJ_AFTER)"
@@ -134,6 +134,36 @@ touch "$T/nofetch"
 OUT=$(cd "$W" && PATH="$T/fakebin:$PATH" FAIL_FETCH=$T/nofetch "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
 [ "$RC" != 0 ] && ok "a recovery whose fetch fails reports failure" || bad "a recovery whose fetch fails reports failure (rc=$RC)"
 rm -f "$T/nofetch"
+
+# --- damage that only shows up when git writes -------------------------
+cd "$T/seed"; echo four > a; git commit -qam c4; git push -q "$T/origin.git" main; cd /
+touch "$W/src/.git/refs/remotes/origin/main.lock"
+RUN "$W" "${ARGS[@]}";                       rc_is "a stale ref lock in the target" 0
+is  "  does not stop the update" four "$(cat "$W/src/a")"
+
+cd "$T/seed"; echo five > a; git commit -qam c5; git push -q "$T/origin.git" main; cd /
+touch "$W/ref.git/refs/remotes/origin/main.lock"
+RUN "$W" "${ARGS[@]}";                       rc_is "a stale ref lock in the reference dir" 0
+is  "  does not stop the update either" five "$(cat "$W/src/a")"
+
+# --- a deleted remote branch must not fall back to the local one -------
+cd "$T/seed"; git checkout -qb gone; echo g > a; git commit -qam g
+git push -q "$T/origin.git" gone; git checkout -q main; cd /
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref gone
+rc_is "a branch that exists on the remote" 0
+git -C "$T/seed" push -q "$T/origin.git" --delete gone
+RUN "$W" "${ARGS[@]}"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref gone
+[ "$RC" != 0 ] && ok "a branch deleted from the remote fails" || bad "a branch deleted from the remote fails (rc=$RC)"
+is  "  rather than building the stale local one" five "$(cat "$W/src/a")"
+
+# --- a destructive path is resolved before it is acted on --------------
+rm -rf "$T/fakerm"; mkdir -p "$T/fakerm"
+printf '#!/bin/sh\necho "RM $*" >&2\n' > "$T/fakerm/rm"; chmod +x "$T/fakerm/rm"
+OUT=$(cd "$W" && PATH="$T/fakerm:$PATH" "$SH" "$SCRIPT" --repo "$T/origin.git" \
+    --ref-dir ref.git --target-dir /tmp/.. --target-ref main 2>&1); RC=$?
+hasnt "a target dir resolving to the root is refused" "RM -rf /tmp/../.git"
+has  "  and says so" "refusing to recover unsafe target dir"
 
 # --- the token must not reach an xtrace log ----------------------------
 rm -rf "$W/src5"
