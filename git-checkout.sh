@@ -51,10 +51,23 @@ add_refspec() {
 }
 
 set_git_cfg() {
+	# Suppressed before the token is even tested: the caller runs this
+	# script with --debug, so an xtrace would print the token itself, and
+	# masking a value derived from a secret is not something the runner can
+	# be relied on to do.
+	XTRACE=
+	case $- in *x*) XTRACE=1; set +x ;; esac
 	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
 		CREDS=$(echo -n "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')
 		git config http.extraHeader "Authorization: basic $CREDS"
+		CREDS=
 	fi
+	[ "$XTRACE" ] && set -x
+	# The heads refspec is normally created by 'git remote add'. Add it here
+	# too: repairing a repo whose remote section survived without its url
+	# takes the set-url path, which creates no refspec at all, and the store
+	# would then fetch pull refs and no branches.
+	add_refspec '+refs/heads/*:refs/remotes/origin/*'
 	add_refspec '+refs/pull/*/head:refs/remotes/origin/pull/*/head'
 	add_refspec '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge'
 }
@@ -69,17 +82,22 @@ guess_repo() {
 	set_git_cfg
 }
 
-clone_ref_repo() {
+# Doubles as the in-place repair of a damaged reference dir: 'git init
+# --bare' leaves an existing object store alone, and that store must never
+# be deleted - other checkouts borrow objects from it through alternates.
+# Every step is checked explicitly: set -e is suppressed for a function
+# called from an AND-OR list, so a silent failure here would otherwise be
+# reported as a successful recovery.
+clone_ref_repo() (
 	[ -z "$URL" ] && echo Error: repo not defined && usage
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to clone && usage
-	mkdir -p "$REF_DIR"
-	cd "$REF_DIR"
-	git init --bare
-	git remote add origin "$URL" || git remote set-url origin "$URL"
-	set_git_cfg
-	gitm fetch --prune --prune-tags --tags --force
-	cd - > /dev/null
-}
+	mkdir -p "$REF_DIR" || exit 1
+	cd "$REF_DIR" || exit 1
+	git init --bare || exit 1
+	git remote add origin "$URL" || git remote set-url origin "$URL" || exit 1
+	set_git_cfg || exit 1
+	gitm fetch --prune --prune-tags --tags --force || exit 1
+)
 
 update_ref_repo() {
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to update && usage
@@ -89,20 +107,19 @@ update_ref_repo() {
 	cd - > /dev/null
 }
 
-clone_target_repo() {
+clone_target_repo() (
 	[ -z "$URL" ] && echo Error: repo not defined && usage
 	[ -z "$REF_DIR" ] && echo Error: reference dir required to clone && usage
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to clone && usage
-	ABS_REF_DIR=$(abs_path "$REF_DIR")
-	mkdir -p "$TARGET_DIR"
-	cd "$TARGET_DIR"
-	git init
-	git remote add origin "$URL"
-	set_git_cfg
-	echo "$ABS_REF_DIR"/objects > .git/objects/info/alternates
-	gitm fetch --prune --prune-tags --tags --force
-	cd - > /dev/null
-}
+	ABS_REF_DIR=$(abs_path "$REF_DIR") || exit 1
+	mkdir -p "$TARGET_DIR" || exit 1
+	cd "$TARGET_DIR" || exit 1
+	git init || exit 1
+	git remote add origin "$URL" || git remote set-url origin "$URL" || exit 1
+	set_git_cfg || exit 1
+	echo "$ABS_REF_DIR"/objects > .git/objects/info/alternates || exit 1
+	gitm fetch --prune --prune-tags --tags --force || exit 1
+)
 
 update_target_repo() {
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to update && usage
@@ -166,30 +183,38 @@ EOF
 # tracked path against freshly fetched objects anyway. Runs at most once
 # per invocation, so an unrecoverable dir fails instead of looping.
 recover_target_repo() {
+	# Never let a caller with an unset or root target dir reach the rm.
+	case "$TARGET_DIR" in
+		"" | / ) echo "Error: refusing to recover unsafe target dir: '$TARGET_DIR'" && return 1 ;;
+	esac
 	[ "$RECOVERED" ] && return 1
 	RECOVERED="recovered"
 	echo "Warning: recovering $TARGET_DIR - reinitializing its .git (working tree files are kept and reconciled by the checkout)"
-	rm -rf "$TARGET_DIR/.git"
+	rm -rf "$TARGET_DIR/.git" || return 1
 	clone_target_repo
 }
 
-# Retries with --force when a plain checkout is refused, which is how
-# leftovers of an interrupted run present themselves: partially written
-# untracked files, or a worktree/index mismatch after a failed index
-# write. Only the conflicting paths are discarded; other untracked
-# content survives, unlike a full clean.
+# Always forced: the action's contract is that the requested ref is
+# materialized, and a plain checkout can report success while leaving
+# tracked files modified - HEAD would match while the work tree does not.
+# --force discards tracked modifications and removes only the untracked
+# files that stand in the way of a tracked path; everything else in the
+# tree survives, which is what makes clean:false worth having. Wiping
+# unrelated artifacts is clean's job, not this one.
+# An unknown ref is a caller mistake, not damage: it exits 2 so that the
+# dispatcher fails instead of recreating .git for nothing.
 checkout() (
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to checkout && usage
 	[ -z "$TARGET_REF" ] && echo Error: target ref required to checkout && usage
 	cd "$TARGET_DIR" || exit 1
-	if [ "$(git branch --remotes --list origin/$TARGET_REF)" ]; then
-		set -- -B "$TARGET_REF" "origin/$TARGET_REF"
+	if [ "$(git branch --remotes --list "origin/$TARGET_REF")" ]; then
+		git checkout --force -B "$TARGET_REF" "origin/$TARGET_REF"
+	elif git rev-parse --verify --quiet "$TARGET_REF^{commit}" >/dev/null 2>&1; then
+		git checkout --force "$TARGET_REF"
 	else
-		set -- "$TARGET_REF"
+		echo "Error: target ref does not exist: $TARGET_REF"
+		exit 2
 	fi
-	git checkout "$@" && exit 0
-	echo "Warning: checkout refused, retrying with --force (conflicting paths are discarded)"
-	git checkout --force "$@"
 )
 
 
@@ -243,6 +268,14 @@ done
 
 [ "$URL" ] && [ "$URL" = "${URL%.git}" ] && URL=$URL.git
 
+# Validate before anything can touch the filesystem: a target ref with no
+# target dir used to reach the recovery path, where the rm expanded to the
+# root of the filesystem.
+if [ "$TARGET_REF" ] && [ -z "$TARGET_DIR" ]; then
+	echo "Error: --target-ref requires --target-dir"
+	usage
+fi
+
 if [ -z "$REF_DIR" ]; then
 	:
 elif [ -d "$REF_DIR" ] && is_valid_repo "$REF_DIR"; then
@@ -273,7 +306,14 @@ if [ "$TARGET_DIR" ] && [ "$CLEAN" ]; then
 fi
 
 if [ "$TARGET_REF" ]; then
-	checkout || { recover_target_repo && checkout; }
+	CO=0
+	checkout || CO=$?
+	if [ "$CO" -ne 0 ]; then
+		if [ "$CO" -eq 2 ]; then
+			exit 2
+		fi
+		recover_target_repo && checkout
+	fi
 fi
 
 exit 0

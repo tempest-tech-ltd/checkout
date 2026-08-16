@@ -35,17 +35,38 @@ Note: requires git version >= 2.35
     clean: true
 ```
 
+# What a checkout guarantees
+
+After a successful run, `HEAD`, the index and every tracked file match the
+requested ref. Local modifications to tracked files are always discarded -
+this is a build step, not an interactive `git checkout`.
+
+`clean` decides what happens to everything else:
+
+| | tracked content | unrelated untracked / ignored | untracked in the way of the ref |
+| --- | --- | --- | --- |
+| `clean: false` | reset to the ref | kept | removed |
+| `clean: true` | reset to the ref | removed | removed |
+
+So `clean: false` is what lets a reused checkout keep its build output and
+caches; it is not a way to carry local edits across a run.
+
 # Recovery
 
 A checkout dir left damaged by an interrupted run - killed runner, full disk -
-is repaired without being thrown away. A dir that is no longer a usable repo,
-a clean that cannot complete, or a checkout refused by leftovers all lead to
-the same treatment: the checkout is retried with `--force`, and failing that
-`.git` is recreated and refetched. The working tree is kept throughout, since
-the checkout that follows reconciles every tracked path anyway; only paths
-that conflict with the target ref are discarded. A reference dir is repaired
-in place so its object store - which other checkouts borrow through
-alternates - is never deleted.
+is repaired rather than thrown away, with nothing to opt into. A dir that is
+no longer a usable repo, and a clean that cannot complete (a corrupt index,
+for instance), both lead to the same treatment: `.git` is recreated and
+refetched, then the checkout runs again. The working tree is kept throughout,
+since the checkout reconciles every tracked path against freshly fetched
+objects anyway.
+
+A reference dir is repaired in place, never deleted: other checkouts borrow
+objects from its store through alternates, and removing it would break every
+one of them.
+
+A ref that does not exist is treated as a caller mistake, not as damage - it
+fails without recreating anything.
 
 # Scenarios
 
@@ -57,7 +78,7 @@ alternates - is never deleted.
     path: ${{ github.ref_name }}/src
 ```
 
-## Checkout another branch keeping changes
+## Checkout another branch, preserving build artifacts
 ```yaml
 - uses: tempest-tech-ltd/checkout@v2
   with:

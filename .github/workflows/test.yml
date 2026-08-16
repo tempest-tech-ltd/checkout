@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        # The agents that consume this action run it on Linux, on git-bash
+        # and on macOS, where /bin/bash is still 3.2 - so the script has to
+        # hold up under a strict POSIX shell as well as a modern bash.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        shell: [bash]
+        include:
+          - os: ubuntu-latest
+            shell: dash
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dash
+        if: matrix.shell == 'dash'
+        run: sudo apt-get install -y dash
+
+      - name: Run the integration tests
+        env:
+          SH: ${{ matrix.shell }}
+        run: ./test.sh
