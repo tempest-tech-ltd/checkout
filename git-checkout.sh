@@ -41,16 +41,25 @@ objects_dir() {
 
 # --- validation: never changes anything -----------------------------------
 
-# A filesystem root is never a repository dir, and every path here ends up
-# under an rm or a git init. A path that does not exist yet cannot be resolved,
-# and a '..' in it means something different once the dirs above it appear -
-# so the dir is created first and the canonical result is what gets checked.
-# Absolute paths outside the workspace stay allowed: on Windows the default
-# workspace is too deep for a chromium checkout, so ours live elsewhere.
-check_safe_dir() {
+# Turns a caller's path into the one path the rest of the run uses. A '..' in
+# a path that does not exist yet cannot be resolved, and means something else
+# once the dirs above it appear - 'base/keep/new/..' becomes 'base/keep', a
+# directory that belongs to someone else and is about to be git init'd and
+# cleaned. Such a path is refused; an existing one is resolved and checked for
+# being a filesystem root. Absolute paths outside the workspace stay allowed:
+# on Windows the default workspace is too deep for a chromium checkout, so
+# ours live elsewhere. Prints the canonical path.
+prepare_dir() {
 	case "$1" in
 		"" | / | // ) echo "Error: unsafe repository directory: '$1'" >&2; return $RC_INVALID ;;
 	esac
+	if [ ! -d "$1" ]; then
+		case "$1" in
+			.. | ../* | */.. | */../* )
+				echo "Error: '..' is not allowed in a path that does not exist yet: '$1'" >&2
+				return $RC_INVALID ;;
+		esac
+	fi
 	mkdir -p -- "$1" 2>/dev/null || { echo "Error: cannot create directory: '$1'" >&2; return $RC_DAMAGE; }
 	DIR_ABS=$(abs_path "$1")
 	case "$DIR_ABS" in
@@ -58,6 +67,16 @@ check_safe_dir() {
 			echo "Error: unsafe repository directory: '$1' resolves to '$DIR_ABS'" >&2
 			return $RC_INVALID ;;
 	esac
+	printf '%s\n' "$DIR_ABS"
+}
+
+# Neither dir may contain the other: a shared store inside a work tree is
+# removed by clean as untracked, and a target inside the store is walked by
+# the lock sweep.
+check_disjoint() {
+	[ "$1" = "$2" ] && { echo "Error: reference and target dirs are the same: '$1'" >&2; return $RC_INVALID; }
+	case "$2" in "$1"/* ) echo "Error: target dir '$2' is inside reference dir '$1'" >&2; return $RC_INVALID ;; esac
+	case "$1" in "$2"/* ) echo "Error: reference dir '$1' is inside target dir '$2'" >&2; return $RC_INVALID ;; esac
 	return 0
 }
 
@@ -78,8 +97,15 @@ check_stored_identity() {
 	[ -f "$1/config" ] || [ -f "$1/.git/config" ] || return $RC_DAMAGE
 	CFG=$1/config
 	[ -f "$CFG" ] || CFG=$1/.git/config
-	CURRENT=$(git config --file "$CFG" --get remote.origin.url 2>/dev/null || true)
+	# --get returns the last value while fetch uses the first, so more than
+	# one url means the check and the fetch could disagree.
+	COUNT=$(git config --file "$CFG" --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
+	CURRENT=$(git config --file "$CFG" --get-all remote.origin.url 2>/dev/null | head -1)
 	[ -z "$CURRENT" ] && return $RC_DAMAGE
+	if [ "$COUNT" -gt 1 ]; then
+		echo "Error: $1 has more than one origin url" >&2
+		return $RC_INVALID
+	fi
 	[ -z "$URL" ] && URL=$CURRENT && return 0
 	[ "$CURRENT" = "$URL" ] && return 0
 	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
@@ -89,8 +115,13 @@ check_stored_identity() {
 # RC_INVALID when the repo belongs to a different remote: rebinding it would
 # point every checkout sharing this store at another project.
 check_identity() {
-	CURRENT=$(git -C "$1" config --get remote.origin.url 2>/dev/null || true)
+	COUNT=$(git -C "$1" config --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
+	CURRENT=$(git -C "$1" config --get-all remote.origin.url 2>/dev/null | head -1)
 	[ -z "$CURRENT" ] && return $RC_DAMAGE
+	if [ "$COUNT" -gt 1 ]; then
+		echo "Error: $1 has more than one origin url" >&2
+		return $RC_INVALID
+	fi
 	[ -z "$URL" ] && URL=$CURRENT && return 0
 	[ "$CURRENT" = "$URL" ] && return 0
 	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
@@ -116,24 +147,23 @@ check_alternates() {
 
 # --- configuration --------------------------------------------------------
 
-add_refspec() {
-	git -C "$1" config --get-all remote.origin.fetch 2>/dev/null | grep -Fqx "$2" && return 0
-	git -C "$1" config --add remote.origin.fetch "$2"
-}
-
-# The heads refspec is normally 'git remote add's doing; set it here too, so
-# a repo repaired through set-url does not end up fetching pull refs and no
-# branches.
-set_refspecs() {
-	add_refspec "$1" '+refs/heads/*:refs/remotes/origin/*' || return $RC_DAMAGE
-	add_refspec "$1" '+refs/pull/*/head:refs/remotes/origin/pull/*/head' || return $RC_DAMAGE
-	add_refspec "$1" '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' || return $RC_DAMAGE
-}
-
+# origin is the action's to define, not a set to append to. An extra fetch
+# refspec is enough to break a run in a way nothing else notices: a negative
+# one ('^refs/heads/main') keeps the branch out of the fetch, so the remote
+# ref stays behind and the checkout - and the HEAD check, reading that same
+# ref - both pass on an old commit.
 set_origin() {
-	git -C "$1" remote add origin "$URL" 2>/dev/null ||
-		git -C "$1" remote set-url origin "$URL" || return $RC_DAMAGE
+	git -C "$1" config --unset-all remote.origin.url 2>/dev/null || true
+	git -C "$1" config --unset-all remote.origin.fetch 2>/dev/null || true
+	git -C "$1" config --add remote.origin.url "$URL" || return $RC_DAMAGE
 	set_refspecs "$1"
+}
+
+set_refspecs() {
+	git -C "$1" config --unset-all remote.origin.fetch 2>/dev/null || true
+	git -C "$1" config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' || return $RC_DAMAGE
+	git -C "$1" config --add remote.origin.fetch '+refs/pull/*/head:refs/remotes/origin/pull/*/head' || return $RC_DAMAGE
+	git -C "$1" config --add remote.origin.fetch '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' || return $RC_DAMAGE
 }
 
 # The credential goes to the one fetch that needs it and is never written to
@@ -427,14 +457,21 @@ if [ "$TARGET_REF" ] && [ -z "$TARGET_DIR" ]; then
 	usage
 fi
 
-# Recorded before the guard, which creates the dir in order to resolve it.
+# Recorded before prepare_dir, which creates the dir in order to resolve it.
 TARGET_EXISTED=
 [ "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ] && TARGET_EXISTED=1
 
+# From here on both are canonical: every git, find and rm below gets the path
+# that was actually checked, not the string the caller wrote.
 if [ "$REF_DIR" ]; then
-	check_safe_dir "$REF_DIR" || exit $?
+	REF_DIR=$(prepare_dir "$REF_DIR") || exit $?
 fi
-[ "$TARGET_DIR" ] && { check_safe_dir "$TARGET_DIR" || exit $?; }
+if [ "$TARGET_DIR" ]; then
+	TARGET_DIR=$(prepare_dir "$TARGET_DIR") || exit $?
+fi
+if [ "$REF_DIR" ] && [ "$TARGET_DIR" ]; then
+	check_disjoint "$REF_DIR" "$TARGET_DIR" || exit $?
+fi
 
 if [ "$REF_DIR" ]; then
 	ensure_ref_repo "$REF_DIR" || exit $?

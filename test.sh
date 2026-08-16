@@ -253,6 +253,48 @@ rc_is "a target that lost its alternates" 0
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref no-such-ref-at-all
 has "an unknown ref explains itself" "target ref does not exist"
 
+# --- a new path whose '..' would land on someone else's dir ------------
+mkdir -p "$T/base/keep"; echo PRECIOUS > "$T/base/keep/artifact.bin"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir "$T/base/keep/new/.." --target-ref main --clean
+[ "$RC" != 0 ] && ok "a new path with '..' is refused" || bad "a new path with '..' is refused (rc=$RC)"
+is  "  the neighbouring dir is untouched" PRECIOUS "$(cat "$T/base/keep/artifact.bin" 2>/dev/null)"
+[ -d "$T/base/keep/.git" ] && bad "  and was not initialized" || ok "  and was not initialized"
+
+mkdir -p "$T/base2/keep"; echo PRECIOUS > "$T/base2/keep/artifact.bin"
+RUN "$W" --repo "$T/origin.git" --ref-dir "$T/base2/keep/new/.."
+[ "$RC" != 0 ] && ok "the same for the reference dir" || bad "the same for the reference dir (rc=$RC)"
+is  "  its neighbour is untouched too" PRECIOUS "$(cat "$T/base2/keep/artifact.bin" 2>/dev/null)"
+
+# --- reference and target may not contain each other -------------------
+RUN "$W" --repo "$T/origin.git" --ref-dir same --target-dir same --target-ref main
+[ "$RC" != 0 ] && ok "the same dir for both is refused" || bad "the same dir for both is refused (rc=$RC)"
+RUN "$W" --repo "$T/origin.git" --ref-dir nest --target-dir nest/inside --target-ref main
+[ "$RC" != 0 ] && ok "a target inside the reference dir is refused" || bad "a target inside the reference dir is refused (rc=$RC)"
+RUN "$W" --repo "$T/origin.git" --ref-dir nest2/ref.git --target-dir nest2 --target-ref main
+[ "$RC" != 0 ] && ok "a reference dir inside the target is refused" || bad "a reference dir inside the target is refused (rc=$RC)"
+
+# --- origin belongs to the action --------------------------------------
+git -c init.defaultBranch=main init -q --bare "$T/second.git"
+git -C "$W/src" config --add remote.origin.url "$T/second.git"
+RUN "$W" "${ARGS[@]}"
+if [ "$RC" != 0 ]; then
+    ok "a second origin url is not silently used"
+else
+    is "a second origin url is normalized away" "$T/origin.git" "$(git -C "$W/src" config --get-all remote.origin.url | tr '\n' ' ' | sed 's/ $//')"
+fi
+
+git -C "$W/src" config --unset-all remote.origin.url
+git -C "$W/src" config --add remote.origin.url "$T/origin.git"
+RUN "$W" "${ARGS[@]}";                       rc_is "prep: back to a single origin" 0
+cd "$T/seed"; echo seven > a; git commit -qam c7; git push -q "$T/origin.git" main; cd /
+git -C "$W/src" config --add remote.origin.fetch '^refs/heads/main'
+RUN "$W" "${ARGS[@]}";                       rc_is "a negative refspec added by hand" 0
+is  "  does not keep the checkout behind" seven "$(cat "$W/src/a")"
+
+git -C "$W/src" config --add remote.origin.fetch 'this is not a refspec'
+RUN "$W" "${ARGS[@]}";                       rc_is "a malformed refspec added by hand" 0
+is  "  and the config is back to ours" 3 "$(git -C "$W/src" config --get-all remote.origin.fetch | wc -l | tr -d ' ')"
+
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"
 OUT=$(cd "$W" && GITHUB_TOKEN=ghs_TOKENVALUE "$SH" "$SCRIPT" --repo "$T/origin.git" \

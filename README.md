@@ -74,9 +74,13 @@ A ref that does not exist is treated as a caller mistake, not as damage - it
 fails without recreating anything. So does a reference dir belonging to another
 repository: repair never rebinds a store that other checkouts borrow from.
 
-Because pull refs are fetched into `refs/remotes/origin/pull/*`, a branch
-literally named `pull/<n>/merge` would collide with the pull request ref of the
-same number and git would refuse the fetch. Such branch names are not supported.
+Pull request refs are fetched into `refs/remotes/origin/pull/*`, so branch
+names that overlap that namespace - `pull/<n>/head`, `pull/<n>/merge` - would
+map onto the same remote-tracking ref as the pull request of that number, and
+git refuses to fetch both. Such branch names are not supported.
+
+`origin` belongs to the action: its url and fetch refspecs are rewritten on
+every run, so extra or hand-edited values there do not survive.
 
 A reference dir must not be updated by two runs at once. Lock files left behind
 by an interrupted git are removed, which assumes the run owns that directory
