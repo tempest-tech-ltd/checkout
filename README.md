@@ -74,6 +74,10 @@ A ref that does not exist is treated as a caller mistake, not as damage - it
 fails without recreating anything. So does a reference dir belonging to another
 repository: repair never rebinds a store that other checkouts borrow from.
 
+Because pull refs are fetched into `refs/remotes/origin/pull/*`, a branch
+literally named `pull/<n>/merge` would collide with the pull request ref of the
+same number and git would refuse the fetch. Such branch names are not supported.
+
 A reference dir must not be updated by two runs at once. Lock files left behind
 by an interrupted git are removed, which assumes the run owns that directory
 for its duration.

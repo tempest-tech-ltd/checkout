@@ -42,16 +42,20 @@ objects_dir() {
 # --- validation: never changes anything -----------------------------------
 
 # A filesystem root is never a repository dir, and every path here ends up
-# under an rm or a git init. Checked once, before anything is touched, and
-# for both dirs - not as a property of one recovery function. Absolute paths
-# outside the workspace stay allowed: on Windows the default workspace is
-# too deep for a chromium checkout, so ours live elsewhere on purpose.
+# under an rm or a git init. A path that does not exist yet cannot be resolved,
+# and a '..' in it means something different once the dirs above it appear -
+# so the dir is created first and the canonical result is what gets checked.
+# Absolute paths outside the workspace stay allowed: on Windows the default
+# workspace is too deep for a chromium checkout, so ours live elsewhere.
 check_safe_dir() {
-	[ -d "$1" ] || return 0
+	case "$1" in
+		"" | / | // ) echo "Error: unsafe repository directory: '$1'" >&2; return $RC_INVALID ;;
+	esac
+	mkdir -p -- "$1" 2>/dev/null || { echo "Error: cannot create directory: '$1'" >&2; return $RC_DAMAGE; }
 	DIR_ABS=$(abs_path "$1")
 	case "$DIR_ABS" in
 		"" | / | // | ?:[/\\] | ?:[/\\][/\\] )
-			echo "Error: unsafe repository directory: '$1'" >&2
+			echo "Error: unsafe repository directory: '$1' resolves to '$DIR_ABS'" >&2
 			return $RC_INVALID ;;
 	esac
 	return 0
@@ -182,7 +186,7 @@ create_ref_repo() {
 	mkdir -p "$1" || return $RC_DAMAGE
 	git -C "$1" init --bare || return $RC_DAMAGE
 	set_origin "$1" || return $RC_DAMAGE
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force
+	fetch_repo "$1" fetch --prune --prune-tags --tags --force origin
 }
 
 # 'git init --bare' over a damaged bare repo leaves its objects alone, so the
@@ -199,13 +203,17 @@ ensure_ref_repo() {
 	# Identity first, so a repo too damaged to open cannot be rebound.
 	RC=0; check_stored_identity "$1" || RC=$?
 	[ "$RC" -eq "$RC_INVALID" ] && return $RC
+	# Then the locks, before anything else touches the repo: a config.lock
+	# left by a killed process makes even 'git init --bare' fail, and the
+	# repair below would be unable to run for good. The dir is the gitdir
+	# here, so this works on a repo git can no longer open.
+	find "$1" -name '*.lock' -type f -exec rm -f -- {} + 2>/dev/null
 	if is_bare_repo "$1"; then
 		RC=0; check_identity "$1" || RC=$?
 		[ "$RC" -eq "$RC_INVALID" ] && return $RC
 		if [ "$RC" -eq 0 ]; then
-			clear_stale_locks "$1"
 			set_refspecs "$1" || return $?
-			fetch_repo "$1" -c gc.auto=0 fetch --prune --prune-tags --tags --force && return 0
+			fetch_repo "$1" -c gc.auto=0 fetch --prune --prune-tags --tags --force origin && return 0
 			echo "Warning: $1 could not be updated, reinitializing it in place (existing objects are kept)"
 		else
 			# Fetching without an origin url succeeds and does nothing at
@@ -229,7 +237,7 @@ create_target_repo() {
 	set_origin "$1" || return $RC_DAMAGE
 	GD=$(git -C "$1" rev-parse --absolute-git-dir) || return $RC_DAMAGE
 	echo "$REF_OBJECTS" > "$GD/objects/info/alternates" || return $RC_DAMAGE
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force
+	fetch_repo "$1" fetch --prune --prune-tags --tags --force origin
 }
 
 # Recreates .git and refetches, keeping the working tree: its untracked
@@ -353,7 +361,7 @@ checkout() {
 target_steps() {
 	clear_stale_locks "$1"
 	set_refspecs "$1" || return $?
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force --recurse-submodules=no || return $?
+	fetch_repo "$1" fetch --prune --prune-tags --tags --force --recurse-submodules=no origin || return $?
 	if [ "$CLEAN" ]; then
 		clean "$1" || return $?
 	fi
@@ -419,6 +427,10 @@ if [ "$TARGET_REF" ] && [ -z "$TARGET_DIR" ]; then
 	usage
 fi
 
+# Recorded before the guard, which creates the dir in order to resolve it.
+TARGET_EXISTED=
+[ "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ] && TARGET_EXISTED=1
+
 if [ "$REF_DIR" ]; then
 	check_safe_dir "$REF_DIR" || exit $?
 fi
@@ -434,7 +446,7 @@ fi
 # then are the steps tried, and only a repairable failure earns one repair
 # and one retry. An invalid invocation stops here rather than being answered
 # by deleting metadata.
-if [ ! -d "$TARGET_DIR" ]; then
+if [ -z "$TARGET_EXISTED" ]; then
 	create_target_repo "$TARGET_DIR" || exit $?
 elif ! is_repo "$TARGET_DIR" .git; then
 	echo "Warning: $TARGET_DIR is not a valid git repo"
