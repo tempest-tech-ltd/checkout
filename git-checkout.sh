@@ -3,7 +3,7 @@
 set -e
 
 usage() {
-	echo Usage: `basename $0` "[--repo REPO_URL] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--force] [--debug]"
+	echo Usage: `basename $0` "[--repo REPO_URL] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
 	exit 1
 }
 
@@ -29,21 +29,6 @@ gitm() {
 		delay=$((delay * 2))
 	done
 	return 1
-}
-
-# Checkout that may retry with --force. A previous interrupted run can leave
-# leftovers a plain checkout refuses to touch: partially written untracked
-# files, or a worktree/index mismatch after a failed index write. --force
-# discards only the conflicting paths; other untracked content is kept.
-# Recovery of a broken repo implies --force for its first checkout: the
-# leftovers there are not precious, a from-scratch clone would not have
-# kept them at all.
-gitc() {
-	git checkout "$@" && return 0
-	RC=$?
-	[ -z "$FORCE" ] && [ -z "$RECOVERED" ] && exit $RC
-	echo "Warning: checkout refused, retrying with --force (conflicting local changes will be discarded)"
-	git checkout --force "$@"
 }
 
 # True if DIR itself is a usable git repo: a work tree or a bare repo with
@@ -137,9 +122,14 @@ update_target_repo() {
 	cd "$SAVPWD"
 }
 
-clean() {
+# Reports failure instead of aborting, so a repo damaged past cleaning
+# (a corrupt index, say) can be recovered rather than wedging the dir for
+# good. Runs in a subshell: that keeps the cd local and makes the exits
+# below catchable by the caller. The steps are best effort; the final
+# status is the verdict.
+clean() (
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to clean && usage
-	cd "$TARGET_DIR"
+	cd "$TARGET_DIR" || exit 1
 
 	git merge --abort  >/dev/null 2>&1 || true
 	git rebase --abort >/dev/null 2>&1 || true
@@ -149,37 +139,58 @@ clean() {
 	git bisect reset >/dev/null 2>&1 || true
 
 	if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
-		git read-tree --empty
+		git read-tree --empty || exit 1
 	fi
-	git clean -dffx
+	git clean -dffx || exit 1
 	if git rev-parse --verify HEAD >/dev/null 2>&1; then
-		git reset --hard HEAD
+		git reset --hard HEAD || exit 1
 	fi
 
-	git submodule foreach 'cd "$toplevel" && rm -fr -- "$sm_path"'
+	git submodule foreach 'cd "$toplevel" && rm -fr -- "$sm_path"' || exit 1
 	cat <<EOF
 	Note: The next command may produce error and warning messages due to
 	the nature of submodule deinitialization.
 	This is expected behavior and _usually_ does not indicate a problem.
 EOF
-	git submodule deinit --force --all
+	git submodule deinit --force --all || true
 	rm -fr .git/modules
 
-	[ "$(git status --porcelain --ignored)" ] && echo Clean failed && exit 1
-	cd - > /dev/null
+	STATUS=$(git status --porcelain --ignored) || exit 1
+	[ "$STATUS" ] && echo Clean failed && exit 1
+	exit 0
+)
+
+# Recreate the target's .git and refetch, keeping the working tree. For a
+# chromium-sized checkout the untracked content - build output, gclient
+# deps - is worth hours, and the checkout that follows reconciles every
+# tracked path against freshly fetched objects anyway. Runs at most once
+# per invocation, so an unrecoverable dir fails instead of looping.
+recover_target_repo() {
+	[ "$RECOVERED" ] && return 1
+	RECOVERED="recovered"
+	echo "Warning: recovering $TARGET_DIR - reinitializing its .git (working tree files are kept and reconciled by the checkout)"
+	rm -rf "$TARGET_DIR/.git"
+	clone_target_repo
 }
 
-checkout() {
+# Retries with --force when a plain checkout is refused, which is how
+# leftovers of an interrupted run present themselves: partially written
+# untracked files, or a worktree/index mismatch after a failed index
+# write. Only the conflicting paths are discarded; other untracked
+# content survives, unlike a full clean.
+checkout() (
 	[ -z "$TARGET_DIR" ] && echo Error: target dir required to checkout && usage
 	[ -z "$TARGET_REF" ] && echo Error: target ref required to checkout && usage
-	cd "$TARGET_DIR"
+	cd "$TARGET_DIR" || exit 1
 	if [ "$(git branch --remotes --list origin/$TARGET_REF)" ]; then
-		gitc -B $TARGET_REF origin/$TARGET_REF
+		set -- -B "$TARGET_REF" "origin/$TARGET_REF"
 	else
-		gitc $TARGET_REF
+		set -- "$TARGET_REF"
 	fi
-	cd - > /dev/null
-}
+	git checkout "$@" && exit 0
+	echo "Warning: checkout refused, retrying with --force (conflicting paths are discarded)"
+	git checkout --force "$@"
+)
 
 
 [ $# -eq 0 ] && usage
@@ -189,7 +200,6 @@ REF_DIR=
 TARGET_DIR=
 TARGET_REF=
 CLEAN=
-FORCE=
 RECOVERED=
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -215,10 +225,6 @@ while [ $# -gt 0 ]; do
 			;;
 		--clean)
 			CLEAN="clean"
-			shift
-			;;
-		--force)
-			FORCE="force"
 			shift
 			;;
 		--debug)
@@ -248,23 +254,26 @@ fi
 
 if [ -z "$TARGET_DIR" ]; then
 	:
-elif [ -d "$TARGET_DIR" ] && is_valid_repo "$TARGET_DIR"; then
-	update_target_repo
-	[ "$CLEAN" ] && clean
-else
-	if [ -d "$TARGET_DIR" ]; then
-		echo "Warning: $TARGET_DIR is not a valid git repo, recloning in place (working tree files are kept and reconciled by the checkout)"
-		rm -rf "$TARGET_DIR/.git"
-		RECOVERED="recovered"
-	fi
+elif [ ! -d "$TARGET_DIR" ]; then
 	clone_target_repo
-	[ "$RECOVERED" ] && [ "$CLEAN" ] && clean
+elif is_valid_repo "$TARGET_DIR"; then
+	update_target_repo
+else
+	echo "Warning: $TARGET_DIR is not a valid git repo"
+	recover_target_repo
 fi
 
-if [ "$RECOVERED" ] && [ -z "$TARGET_REF" ] && [ -z "$CLEAN" ]; then
-	echo "Warning: $TARGET_DIR was recovered but no --target-ref was given; its preserved files stay untracked until a checkout (--force) reconciles them"
+# Both steps below follow the same rule: try, and if the repo turns out to
+# be damaged past that step, recover it once and retry. A repo that cannot
+# be cleaned (a corrupt index, say) is exactly such a case, and a checkout
+# refused even with --force is another. Once recovery has been spent the
+# failure propagates and the run stops instead of looping.
+if [ "$TARGET_DIR" ] && [ "$CLEAN" ]; then
+	clean || { recover_target_repo && clean; }
 fi
 
-[ "$TARGET_REF" ] && checkout
+if [ "$TARGET_REF" ]; then
+	checkout || { recover_target_repo && checkout; }
+fi
 
 exit 0
