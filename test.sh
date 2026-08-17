@@ -38,6 +38,7 @@ echo "# checkout under $SH ($("$SH" -c 'echo $0') / git $(git --version | awk '{
 
 # --- the happy paths ----------------------------------------------------
 RUN "$W" "${ARGS[@]}";                       rc_is "fresh clone" 0
+hasnt "  is not reported as a repair" "$REPAIR"
 is  "  checks out the ref" two "$(cat "$W/src/a")"
 [ -s "$W/src/.git/objects/info/alternates" ] && ok "  borrows from the reference store" || bad "  no alternates"
 
@@ -398,6 +399,52 @@ RUN "$W" --repo "$T/origin.git" --ref-dir refB2
 printf '[include]\n\tpath = /nowhere\n[\n' > "$W/refB2/config"
 RUN "$W" --repo "$T/origin.git" --ref-dir refB2
 [ "$RC" != 0 ] && ok "an unreadable config with includes is refused" || bad "an unreadable config with includes is refused (rc=$RC)"
+
+# --- a url the machine's config rewrites --------------------------------
+# The other repo has to be a usable one: a rewrite onto an empty repo fails
+# on its own, and would let this pass without the check being there at all.
+git -c init.defaultBranch=main init -q --bare "$T/rewritten.git"
+cd "$T/seed"; git checkout -q -b rewritten; echo REWRITTEN > a; git commit -qam rw
+git push -q "$T/rewritten.git" rewritten:main; git checkout -q main; cd /
+git -C "$W/src" config "url.$T/rewritten.git.insteadOf" "$T/origin.git"
+RUN "$W" "${ARGS[@]}"
+[ "$RC" != 0 ] && ok "a rewritten repository url is refused" || bad "a rewritten repository url is refused (rc=$RC)"
+has "  and says what it was rewritten to" "rewrites"
+is  "  the checkout is left as it was" eight "$(cat "$W/src/a")"
+git -C "$W/src" config --unset "url.$T/rewritten.git.insteadOf"
+RUN "$W" "${ARGS[@]}";                       rc_is "  and works again once it is gone" 0
+
+# --- a .git file pointing at another checkout ---------------------------
+rm -rf "$W/srcG" "$W/srcG2"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcG --target-ref main
+rc_is "prep: a healthy target to borrow from" 0
+mkdir -p "$W/srcG2"; echo "gitdir: $W/srcG/.git" > "$W/srcG2/.git"; echo OLD > "$W/srcG2/a"
+G_HEAD=$(git -C "$W/srcG" rev-parse HEAD)
+cd "$T/seed"; echo nine > a; git commit -qam c9; git push -q "$T/origin.git" main; cd /
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcG2 --target-ref main
+rc_is "a target whose .git names another repo" 0
+[ -d "$W/srcG2/.git" ] && ok "  gets a git dir of its own" || bad "  gets a git dir of its own"
+is  "  and the ref's content" nine "$(cat "$W/srcG2/a")"
+is  "  the other checkout keeps its HEAD" "$G_HEAD" "$(git -C "$W/srcG" rev-parse HEAD)"
+is  "  and its work tree" "" "$(git -C "$W/srcG" status --porcelain)"
+
+# --- a replacement ref in a reused target -------------------------------
+rm -rf "$W/srcR"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcR --target-ref main
+rc_is "prep: a target to plant a replacement in" 0
+R_NEW=$(git -C "$W/srcR" rev-parse HEAD)
+R_OLD=$(git -C "$W/srcR" rev-parse HEAD~1)
+git -C "$W/srcR" replace "$R_OLD" "$R_NEW" >/dev/null 2>&1
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcR --target-ref "$R_OLD"
+rc_is "a commit with a replacement ref" 0
+is  "  checks out the commit that was asked for" eight "$(cat "$W/srcR/a")"
+
+# --- an unreadable config whose section names are upper case ------------
+rm -rf "$W/refB3"
+RUN "$W" --repo "$T/origin.git" --ref-dir refB3;  rc_is "prep: a reference dir" 0
+printf '[REMOTE "origin"]\n\tURL = %s\n[\n' "$T/second.git" > "$W/refB3/config"
+RUN "$W" --repo "$T/origin.git" --ref-dir refB3
+[ "$RC" != 0 ] && ok "an unreadable config is read case-insensitively" || bad "an unreadable config is read case-insensitively (rc=$RC)"
 
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"

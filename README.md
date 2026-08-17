@@ -72,7 +72,23 @@ one of them.
 
 A ref that does not exist is treated as a caller mistake, not as damage - it
 fails without recreating anything. So does a reference dir belonging to another
-repository: repair never rebinds a store that other checkouts borrow from.
+repository: repair does not rebind a store that other checkouts borrow from.
+One narrow exception, for stores that predate this: if the config is damaged
+past reading and nothing can be recovered from it - no origin url, no include
+that might carry one - there is no identity left to protect, and the store is
+accepted for the repository that was asked for.
+
+A git configuration that rewrites the repository url - `url.<base>.insteadOf`,
+in the machine's config or the checkout's own - is refused rather than followed.
+Otherwise the store would keep the name of one repository and the objects of
+another, with every check still passing.
+
+The target owns its `.git`: a directory, not a gitfile pointing into another
+checkout, and not a git dir shared with one. A target that shares metadata is
+rebuilt with its own, and the checkout it borrowed from is left alone.
+
+Tags are mirrored from the remote, so a tag deleted upstream is deleted here,
+and a tag created locally in the checkout does not survive the next run.
 
 Pull request refs are fetched into `refs/remotes/origin/pull/*`, so branch
 names that overlap that namespace - `pull/<n>/head`, `pull/<n>/merge` - would

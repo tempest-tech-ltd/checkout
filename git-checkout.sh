@@ -13,8 +13,13 @@
 # it does not apply inside a function called from an AND-OR list, which is
 # where all of these are called from.
 
-# An inherited git context would silently redirect every command below.
+# An inherited git context would silently redirect every command below. A
+# replacement ref left in a reused checkout is the same problem one level
+# down: it swaps the tree behind a commit while its id - the one every check
+# here compares - stays the requested one.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_REPLACE_OBJECTS
 
 RC_DAMAGE=1     # local metadata are broken - repairable
 RC_INVALID=2    # the caller asked for something impossible - not repairable
@@ -198,6 +203,18 @@ set_refspecs() {
 # the token and its encoding, which a runner is not obliged to mask.
 fetch_repo() {
 	DIR=$1; shift
+	# git rewrites the url it is handed through url.<base>.insteadOf, so the
+	# repo the caller named and the one the fetch reaches can differ while
+	# every identity check still passes: the store keeps the name of one repo
+	# and the objects of another. The rewrite is refused rather than followed,
+	# since it usually comes from the machine's own config and nothing here
+	# could repair it. Asked in the same dir the fetch runs in, which is what
+	# decides the answer.
+	EFFECTIVE=$(git -C "$DIR" ls-remote --get-url "$URL") || return $RC_DAMAGE
+	if [ "$EFFECTIVE" != "$URL" ]; then
+		echo "Error: git config rewrites '$URL' to '$EFFECTIVE' - remove the url.*.insteadOf entry" >&2
+		return $RC_INVALID
+	fi
 	XTRACE=
 	case $- in *x*) XTRACE=1; set +x ;; esac
 	GIT_CONFIG_COUNT=0
@@ -271,10 +288,12 @@ ensure_ref_repo() {
 			echo "Error: $1 has an unreadable config with includes; its identity cannot be established" >&2
 			return $RC_INVALID
 		fi
+		# Section and variable names are case-insensitive to git, the
+		# subsection name is not.
 		SALVAGED=$(awk '
-			/^[[:space:]]*\[/ { in_origin = ($0 ~ /^[[:space:]]*\[remote[[:space:]]+"origin"\]/) }
-			in_origin && /^[[:space:]]*url[[:space:]]*=/ {
-				sub(/^[[:space:]]*url[[:space:]]*=[[:space:]]*/, ""); print; exit
+			/^[[:space:]]*\[/ { in_origin = ($0 ~ /^[[:space:]]*\[[Rr][Ee][Mm][Oo][Tt][Ee][[:space:]]+"origin"\]/) }
+			in_origin && /^[[:space:]]*[Uu][Rr][Ll][[:space:]]*=/ {
+				sub(/^[[:space:]]*[Uu][Rr][Ll][[:space:]]*=[[:space:]]*/, ""); print; exit
 			}' "$1/config")
 		# A url that disagrees means the store belongs to someone else and
 		# must not be rebound. Nothing readable at all is a different thing:
@@ -450,6 +469,27 @@ checkout() {
 # command here would follow it: clean would wipe that other directory and the
 # checkout would write there, while the dir the caller named keeps its old
 # content and HEAD still matches. Recreating .git drops the setting.
+# The other half of the same rule: a .git that is a file - the gitfile a
+# linked worktree or a submodule uses - keeps the metadata in another
+# checkout. Index, HEAD, the lock sweep and the fetch would all be that
+# repo's while the files land here, so the caller's dir comes out right and
+# the other one is left with a moved HEAD over an old work tree, at exit 0.
+# Checked before anything is touched, and repairable: recovery deletes the
+# gitfile, not the repo it names.
+check_target_layout() {
+	[ -d "$1/.git" ] || { echo "Warning: $1 has no .git directory of its own" >&2; return $RC_DAMAGE; }
+	GD=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return $RC_DAMAGE
+	GD=$(abs_path "$GD")
+	[ "$GD" = "$(abs_path "$1/.git")" ] || { echo "Warning: $1 keeps its metadata in $GD" >&2; return $RC_DAMAGE; }
+	COMMON=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return $RC_DAMAGE
+	case "$COMMON" in
+		/* | ?:[/\\]* ) COMMON=$(abs_path "$COMMON") ;;
+		* ) COMMON=$(abs_path "$1/$COMMON") ;;
+	esac
+	[ "$COMMON" = "$GD" ] || { echo "Warning: $1 shares the git dir $COMMON" >&2; return $RC_DAMAGE; }
+	return 0
+}
+
 check_worktree_root() {
 	TOP=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return $RC_DAMAGE
 	[ "$(abs_path "$TOP")" = "$1" ] && return 0
@@ -466,8 +506,9 @@ has_skip_worktree() {
 }
 
 target_steps() {
-	clear_stale_locks "$1"
+	check_target_layout "$1" || return $?
 	check_worktree_root "$1" || return $?
+	clear_stale_locks "$1"
 	has_skip_worktree "$1" && { echo "Warning: $1 has files marked skip-worktree" >&2; return $RC_DAMAGE; }
 	set_refspecs "$1" || return $?
 	fetch_repo "$1" fetch --prune --force --recurse-submodules=no || return $?
