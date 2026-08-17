@@ -325,7 +325,10 @@ create_ref_repo() {
 	mkdir -p "$1" || return $RC_DAMAGE
 	git -C "$1" init --bare || return $RC_DAMAGE
 	set_origin "$1" || return $RC_DAMAGE
-	fetch_repo "$1" fetch --prune --force
+	# Also the repair path for a store that already holds objects, so it
+	# carries what the update path carries: a fetch here must not start an
+	# auto-gc over a store the whole machine borrows from.
+	fetch_repo "$1" -c gc.auto=0 fetch --prune --force
 }
 
 # 'git init --bare' over a damaged bare repo leaves its objects alone, so the
@@ -723,9 +726,14 @@ else
 	check_target_layout "$TARGET_DIR" || RC=$?
 	if [ "$RC" -eq 0 ]; then
 		check_identity "$TARGET_DIR" || RC=$?
+		# A target naming another repository is damage, not a refusal: the
+		# no-rebind rule protects a store other checkouts borrow from, and
+		# a target lends nothing. All it costs is a working tree the
+		# checkout would replace anyway. The reference dir keeps the rule.
+		[ "$RC" -eq "$RC_INVALID" ] && RC=$RC_DAMAGE
 		# check_alternates says what is wrong itself; this one is the only
 		# diagnosis a missing origin gets.
-		[ "$RC" -ne 0 ] && [ "$RC" -ne "$RC_INVALID" ] && echo "Warning: $TARGET_DIR has no usable origin"
+		[ "$RC" -ne 0 ] && echo "Warning: $TARGET_DIR has no usable origin"
 		[ "$RC" -eq 0 ] && { check_alternates "$TARGET_DIR" || RC=$?; }
 	fi
 	if [ "$RC" -eq "$RC_INVALID" ]; then

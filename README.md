@@ -72,7 +72,10 @@ one of them.
 
 A ref that does not exist is treated as a caller mistake, not as damage - it
 fails without recreating anything. So does a reference dir belonging to another
-repository: repair does not rebind a store that other checkouts borrow from.
+repository: repair does not rebind a store that other checkouts borrow from. A
+target naming another repository is rebuilt instead: it lends its objects to
+nobody, and all a rebuild costs there is a working tree the checkout replaces
+anyway.
 One narrow exception, for stores that predate this: if the config is damaged
 past reading and nothing can be recovered from it - no origin url, no include
 that might carry one - there is no identity left to protect, and the store is

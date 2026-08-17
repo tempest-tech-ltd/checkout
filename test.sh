@@ -177,7 +177,7 @@ rm -rf "$T/fakerm"; mkdir -p "$T/fakerm"
 printf '#!/bin/sh\necho "RM $*" >&2\n' > "$T/fakerm/rm"; chmod +x "$T/fakerm/rm"
 OUT=$(cd "$W" && PATH="$T/fakerm:$PATH" "$SH" "$SCRIPT" --repo "$T/origin.git" \
     --ref-dir ref.git --target-dir /tmp/.. --target-ref main 2>&1); RC=$?
-hasnt "a target dir resolving to the root is refused" "RM -rf /tmp/../.git"
+hasnt "a target dir resolving to the root is refused" "RM "
 # Asked the way the script asks: on git-bash /tmp/.. is the MSYS root in
 # windows spelling, an ordinary directory, and there is nothing to refuse.
 case "$(abspath /tmp/..)" in
@@ -544,6 +544,29 @@ RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW --target-ref
 has "  and says why" "linked work trees"
 [ -d "$W/srcW/.git/worktrees/linked" ] && ok "  the linked work tree still has its metadata" || bad "  the linked work tree still has its metadata"
 is_path "  and still resolves" "$W/srcW/.git/worktrees/linked" "$(git -C "$W/linked" rev-parse --absolute-git-dir 2>&1)"
+
+# --- a target that names another repository ------------------------------
+rm -rf "$W/srcB"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcB --target-ref main
+rc_is "prep: a target of one repository" 0
+RUN "$W" --repo "$T/rewritten.git" --ref-dir refO --target-dir srcB --target-ref main
+rc_is "a target pointed at another repository is rebuilt" 0
+is  "  and holds the other repository's content" REWRITTEN "$(cat "$W/srcB/a")"
+is_path "  with its origin" "$T/rewritten.git" "$(git -C "$W/srcB" config --get remote.origin.url)"
+
+# --- the reference dir keeps the rule the target does not ----------------
+RUN "$W" --repo "$T/rewritten.git" --ref-dir ref.git
+[ "$RC" != 0 ] && ok "a reference dir of another repository is still refused" || bad "a reference dir of another repository is still refused (rc=$RC)"
+
+# --- repairing a reference dir must not start an auto-gc -----------------
+rm -rf "$T/gitlog" "$T/fakegit"; mkdir -p "$T/fakegit"
+printf '#!/bin/sh\necho "$*" >> "$GITLOG"\nexec git_real "$@"\n' > "$T/fakegit/git"
+chmod +x "$T/fakegit/git"; ln -sf "$(command -v git)" "$T/fakegit/git_real"
+rm "$W/ref.git/HEAD"
+OUT=$(cd "$W" && PATH="$T/fakegit:$PATH" GITLOG="$T/gitlog" "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a reference dir repaired in place" 0
+grep -q '^-C .*ref\.git .*gc\.auto=0 fetch' "$T/gitlog" \
+    && ok "  fetches with auto-gc off" || bad "  fetches with auto-gc off"
 
 # --- a registration left behind by a work tree that is gone --------------
 rm -rf "$W/srcW2" "$W/linked2"
