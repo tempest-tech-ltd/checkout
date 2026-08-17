@@ -197,7 +197,12 @@ set_origin() {
 clear_replace_refs() {
 	git -C "$1" for-each-ref --format='delete %(refname)' refs/replace 2>/dev/null \
 		| git -C "$1" update-ref --stdin 2>/dev/null
-	return 0
+	# update-ref can be refused - a reference-transaction hook is enough -
+	# and a refusal that went unnoticed would leave exactly what this is
+	# here to remove.
+	[ -z "$(git -C "$1" for-each-ref --format='%(refname)' refs/replace 2>/dev/null)" ] && return 0
+	echo "Warning: $1 keeps replacement refs that could not be removed" >&2
+	return $RC_DAMAGE
 }
 
 set_refspecs() {
@@ -396,8 +401,21 @@ recover_target_repo() {
 # answers for what has changed since. Both survive in a reused checkout, and
 # neither is anything a build step should be deciding.
 gitw() {
-	DIR=$1; shift
-	git -C "$DIR" -c core.fsmonitor=false -c core.hooksPath="$DIR/.git/hooks-disabled" "$@"
+	GW_DIR=$1; shift
+	git -C "$GW_DIR" -c core.fsmonitor=false -c core.hooksPath="$GW_DIR/.git/hooks-disabled" "$@"
+}
+
+# hooksPath works by naming a directory that is not there. It is inside a
+# .git a healthy target keeps between runs, so it is the one place a hook
+# would still run from - and unlike .git/hooks, which tools populate by
+# accident, this path is named in the script. It belongs to the action, like
+# origin and the replacement refs: removed every run, and a removal that
+# does not take is damage, since only a fresh .git settles it.
+clear_hook_path() {
+	rm -rf -- "$1/.git/hooks-disabled" 2>/dev/null
+	[ -e "$1/.git/hooks-disabled" ] || return 0
+	echo "Warning: $1/.git/hooks-disabled cannot be removed" >&2
+	return $RC_DAMAGE
 }
 
 clean() {
@@ -550,6 +568,7 @@ target_steps() {
 	check_target_layout "$1" || return $?
 	check_worktree_root "$1" || return $?
 	clear_stale_locks "$1"
+	clear_hook_path "$1" || return $?
 	has_skip_worktree "$1" && { echo "Warning: $1 has files marked skip-worktree" >&2; return $RC_DAMAGE; }
 	set_refspecs "$1" || return $?
 	fetch_repo "$1" fetch --prune --force --recurse-submodules=no || return $?
@@ -563,7 +582,7 @@ target_steps() {
 		# invariant is that a finished target holds none of them at all.
 		has_skip_worktree "$1" && { echo "Warning: the checkout left files marked skip-worktree in $1" >&2; return $RC_DAMAGE; }
 	fi
-	clear_replace_refs "$1"
+	clear_replace_refs "$1" || return $?
 	return 0
 }
 

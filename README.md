@@ -98,7 +98,8 @@ Hooks do not run, and `core.fsmonitor` is ignored: the commands that write the
 working tree are given neither. A `post-checkout` hook left in a reused
 checkout runs inside the checkout and before the verification that follows it,
 so it can change tracked files on a run that then reports success. The rest of
-the local config is left alone.
+the local config is left alone - filters and `.git/info/attributes` shape the
+content of the working tree by design, which is what git-lfs is.
 
 Tags are mirrored from the remote, so a tag deleted upstream is deleted here,
 and a tag created locally in the checkout does not survive the next run.

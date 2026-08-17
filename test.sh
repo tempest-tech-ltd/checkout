@@ -447,12 +447,16 @@ is  "  and its work tree" "" "$(git -C "$W/srcG" status --porcelain)"
 
 # --- a .git file naming a checkout of another repository ----------------
 rm -rf "$W/srcO" "$W/srcO2" "$W/refO"
-RUN "$W" --repo "$T/second.git" --ref-dir refO --target-dir srcO
+RUN "$W" --repo "$T/rewritten.git" --ref-dir refO --target-dir srcO --target-ref main
 rc_is "prep: a checkout of another repository" 0
+O_HEAD=$(git -C "$W/srcO" rev-parse HEAD)
 mkdir -p "$W/srcO2"; echo "gitdir: $W/srcO/.git" > "$W/srcO2/.git"
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcO2 --target-ref main
 rc_is "a .git naming another repository's checkout is repaired, not refused" 0
 is  "  and gets the ref's content" nine "$(cat "$W/srcO2/a")"
+is  "  the other repository's checkout keeps its HEAD" "$O_HEAD" "$(git -C "$W/srcO" rev-parse HEAD)"
+is  "  and its work tree" "" "$(git -C "$W/srcO" status --porcelain)"
+is  "  and its content" REWRITTEN "$(cat "$W/srcO/a")"
 
 # --- a replacement ref in a reused target -------------------------------
 rm -rf "$W/srcR"
@@ -473,6 +477,13 @@ chmod +x "$W/src/.git/hooks/post-checkout"
 RUN "$W" "${ARGS[@]}";                       rc_is "a post-checkout hook in a reused target" 0
 is  "  does not get to rewrite the tree" nine "$(cat "$W/src/a")"
 rm -f "$W/src/.git/hooks/post-checkout"
+
+mkdir -p "$W/src/.git/hooks-disabled"
+printf '#!/bin/sh\necho HOOKED > "$(git rev-parse --show-toplevel)/a"\n' > "$W/src/.git/hooks-disabled/post-checkout"
+chmod +x "$W/src/.git/hooks-disabled/post-checkout"
+RUN "$W" "${ARGS[@]}";                       rc_is "a hook in the dir hooksPath names" 0
+is  "  does not get to rewrite the tree either" nine "$(cat "$W/src/a")"
+[ -e "$W/src/.git/hooks-disabled" ] && bad "  and the dir is gone" || ok "  and the dir is gone"
 
 rm -rf "$W/srcD"; mkdir -p "$W/srcD"; ln -s "$W/no-such-dir/.git" "$W/srcD/.git"
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcD --target-ref main
