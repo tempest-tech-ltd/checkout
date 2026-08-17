@@ -191,7 +191,9 @@ set_origin() {
 # no refspec carries them, so --prune cannot see one, and a replacement left
 # in a reused checkout outlives the run. Not applying them - which is what
 # GIT_NO_REPLACE_OBJECTS does - only covers this script; every git command
-# the job runs afterwards would still read the tree it was pointed at.
+# the job runs afterwards would still read the tree it was pointed at. The
+# reference dir keeps its own: nothing is checked out there, and refs do not
+# travel through alternates.
 clear_replace_refs() {
 	git -C "$1" for-each-ref --format='delete %(refname)' refs/replace 2>/dev/null \
 		| git -C "$1" update-ref --stdin 2>/dev/null
@@ -388,6 +390,16 @@ recover_target_repo() {
 
 # Wipes everything that is not tracked content, build output included. The
 # final status is the verdict; the steps before it are best effort.
+# The commands that touch the working tree get the local config that could
+# make them lie taken away: core.hooksPath (or .git/hooks) runs code of its
+# own between the checkout and the check that follows it, and core.fsmonitor
+# answers for what has changed since. Both survive in a reused checkout, and
+# neither is anything a build step should be deciding.
+gitw() {
+	DIR=$1; shift
+	git -C "$DIR" -c core.fsmonitor=false -c core.hooksPath="$DIR/.git/hooks-disabled" "$@"
+}
+
 clean() {
 	git -C "$1" merge --abort  >/dev/null 2>&1 || true
 	git -C "$1" rebase --abort >/dev/null 2>&1 || true
@@ -399,9 +411,9 @@ clean() {
 	if ! git -C "$1" rev-parse --verify HEAD >/dev/null 2>&1; then
 		git -C "$1" read-tree --empty || return $RC_DAMAGE
 	fi
-	git -C "$1" clean -dffx || return $RC_DAMAGE
+	gitw "$1" clean -dffx || return $RC_DAMAGE
 	if git -C "$1" rev-parse --verify HEAD >/dev/null 2>&1; then
-		git -C "$1" reset --hard HEAD || return $RC_DAMAGE
+		gitw "$1" reset --hard HEAD || return $RC_DAMAGE
 	fi
 
 	git -C "$1" submodule foreach 'cd "$toplevel" && rm -fr -- "$sm_path"' || return $RC_DAMAGE
@@ -414,7 +426,9 @@ EOF
 	GD=$(git -C "$1" rev-parse --absolute-git-dir) || return $RC_DAMAGE
 	rm -fr -- "$GD/modules" || return $RC_DAMAGE
 
-	STATUS=$(git -C "$1" status --porcelain --ignored) || return $RC_DAMAGE
+	# -uall: a local status.showUntrackedFiles=no would otherwise mute the
+	# verdict, though not the clean itself.
+	STATUS=$(gitw "$1" status --porcelain -uall --ignored) || return $RC_DAMAGE
 	[ -z "$STATUS" ] && return 0
 	echo "Clean failed"
 	return $RC_DAMAGE
@@ -471,9 +485,9 @@ checkout() {
 	case "$RESOLVED" in
 		refs/remotes/origin/* )
 			BRANCH=${RESOLVED#refs/remotes/origin/}
-			git -C "$1" checkout --force -B "$BRANCH" "$RESOLVED" || return $RC_DAMAGE ;;
+			gitw "$1" checkout --force -B "$BRANCH" "$RESOLVED" || return $RC_DAMAGE ;;
 		* )
-			git -C "$1" checkout --force "$RESOLVED" || return $RC_DAMAGE ;;
+			gitw "$1" checkout --force "$RESOLVED" || return $RC_DAMAGE ;;
 	esac
 	# A checkout that returns zero has still gone wrong if HEAD is not what
 	# was asked for: a refspec lost along the way leaves the remote ref
@@ -537,7 +551,6 @@ target_steps() {
 	check_worktree_root "$1" || return $?
 	clear_stale_locks "$1"
 	has_skip_worktree "$1" && { echo "Warning: $1 has files marked skip-worktree" >&2; return $RC_DAMAGE; }
-	clear_replace_refs "$1"
 	set_refspecs "$1" || return $?
 	fetch_repo "$1" fetch --prune --force --recurse-submodules=no || return $?
 	if [ "$CLEAN" ]; then
@@ -550,6 +563,7 @@ target_steps() {
 		# invariant is that a finished target holds none of them at all.
 		has_skip_worktree "$1" && { echo "Warning: the checkout left files marked skip-worktree in $1" >&2; return $RC_DAMAGE; }
 	fi
+	clear_replace_refs "$1"
 	return 0
 }
 
@@ -653,8 +667,10 @@ else
 	check_target_layout "$TARGET_DIR" || RC=$?
 	if [ "$RC" -eq 0 ]; then
 		check_identity "$TARGET_DIR" || RC=$?
-		[ "$RC" -eq 0 ] && { check_alternates "$TARGET_DIR" || RC=$?; }
+		# check_alternates says what is wrong itself; this one is the only
+		# diagnosis a missing origin gets.
 		[ "$RC" -ne 0 ] && [ "$RC" -ne "$RC_INVALID" ] && echo "Warning: $TARGET_DIR has no usable origin"
+		[ "$RC" -eq 0 ] && { check_alternates "$TARGET_DIR" || RC=$?; }
 	fi
 	if [ "$RC" -eq "$RC_INVALID" ]; then
 		exit $RC

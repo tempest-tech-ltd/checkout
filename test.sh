@@ -466,6 +466,20 @@ rc_is "a commit with a replacement ref" 0
 is  "  checks out the commit that was asked for" eight "$(cat "$W/srcR/a")"
 is  "  and does not leave the replacement behind" "" "$(git -C "$W/srcR" for-each-ref --format='%(refname)' refs/replace)"
 
+# --- a hook and a dangling .git symlink ---------------------------------
+RUN "$W" "${ARGS[@]}"
+printf '#!/bin/sh\necho HOOKED > "$(git rev-parse --show-toplevel)/a"\n' > "$W/src/.git/hooks/post-checkout"
+chmod +x "$W/src/.git/hooks/post-checkout"
+RUN "$W" "${ARGS[@]}";                       rc_is "a post-checkout hook in a reused target" 0
+is  "  does not get to rewrite the tree" nine "$(cat "$W/src/a")"
+rm -f "$W/src/.git/hooks/post-checkout"
+
+rm -rf "$W/srcD"; mkdir -p "$W/srcD"; ln -s "$W/no-such-dir/.git" "$W/srcD/.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcD --target-ref main
+rc_is "a dangling .git symlink" 0
+[ -L "$W/srcD/.git" ] && bad "  is replaced by a real git dir" || ok "  is replaced by a real git dir"
+is  "  and the ref is checked out" nine "$(cat "$W/srcD/a")"
+
 # --- an unreadable config whose section names are upper case ------------
 rm -rf "$W/refB3"
 RUN "$W" --repo "$T/origin.git" --ref-dir refB3;  rc_is "prep: a reference dir" 0
