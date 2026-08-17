@@ -177,12 +177,14 @@ rm -rf "$T/fakerm"; mkdir -p "$T/fakerm"
 printf '#!/bin/sh\necho "RM $*" >&2\n' > "$T/fakerm/rm"; chmod +x "$T/fakerm/rm"
 OUT=$(cd "$W" && PATH="$T/fakerm:$PATH" "$SH" "$SCRIPT" --repo "$T/origin.git" \
     --ref-dir ref.git --target-dir /tmp/.. --target-ref main 2>&1); RC=$?
-hasnt "a target dir resolving to the root is refused" "RM "
 # Asked the way the script asks: on git-bash /tmp/.. is the MSYS root in
-# windows spelling, an ordinary directory, and there is nothing to refuse.
+# windows spelling, an ordinary directory, and there is nothing to refuse -
+# so there the run proceeds and removing things is what it should do.
 case "$(abspath /tmp/..)" in
-    / | // | ?:[/\\] | ?:[/\\][/\\] ) has "  and says so" "unsafe repository directory" ;;
-    * ) skip "  and says so ('..' reaches no root here)" ;;
+    / | // | ?:[/\\] | ?:[/\\][/\\] )
+        hasnt "a target dir resolving to the root is refused" "RM "
+        has   "  and says so" "unsafe repository directory" ;;
+    * ) skip "a target dir resolving to the root ('..' reaches no root here)" ;;
 esac
 
 # --- a wrong repository is a caller mistake, never repaired ------------
@@ -300,7 +302,7 @@ RUN "$W" "${ARGS[@]}"
 if [ "$RC" != 0 ]; then
     ok "a second origin url is not silently used"
 else
-    is "a second origin url is normalized away" "$T/origin.git" "$(git -C "$W/src" config --get-all remote.origin.url | tr '\n' ' ' | sed 's/ $//')"
+    is_path "a second origin url is normalized away" "$T/origin.git" "$(git -C "$W/src" config --get-all remote.origin.url | tr '\n' ' ' | sed 's/ $//')"
 fi
 
 git -C "$W/src" config --unset-all remote.origin.url
