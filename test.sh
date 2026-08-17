@@ -293,7 +293,7 @@ is  "  does not keep the checkout behind" seven "$(cat "$W/src/a")"
 
 git -C "$W/src" config --add remote.origin.fetch 'this is not a refspec'
 RUN "$W" "${ARGS[@]}";                       rc_is "a malformed refspec added by hand" 0
-is  "  and the config is back to ours" 3 "$(git -C "$W/src" config --get-all remote.origin.fetch | wc -l | tr -d ' ')"
+is  "  and the config is back to ours" 4 "$(git -C "$W/src" config --get-all remote.origin.fetch | wc -l | tr -d ' ')"
 
 # --- an alternates file written by an older version --------------------
 rm -rf "$T/sym"; mkdir -p "$T/sym/real"; ln -s real "$T/sym/link"
@@ -319,6 +319,11 @@ SHA_MAIN=$(git -C "$T/seed" rev-parse HEAD)
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref "$SHA_MAIN"
 rc_is "a full commit id" 0
 is  "  lands on that commit" "$SHA_MAIN" "$(git -C "$W/srcH" rev-parse HEAD)"
+
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcU \
+	--target-ref "$(printf '%s' "$SHA_MAIN" | tr 'a-f' 'A-F')"
+rc_is "a commit id in upper case" 0
+is  "  lands on that commit" "$SHA_MAIN" "$(git -C "$W/srcU" rev-parse HEAD)"
 
 # --- skip-worktree and sparse checkout ---------------------------------
 RUN "$W" "${ARGS[@]}"

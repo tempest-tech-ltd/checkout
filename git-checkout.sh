@@ -171,9 +171,13 @@ set_origin() {
 	set_refspecs "$1"
 }
 
+# The stored refspecs are for whoever opens the repo by hand later; the fetch
+# below passes its own on the command line and never reads these. They are kept
+# equal to it so a manual fetch does the same thing.
 set_refspecs() {
 	git -C "$1" config --unset-all remote.origin.fetch 2>/dev/null || true
 	git -C "$1" config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' || return $RC_DAMAGE
+	git -C "$1" config --add remote.origin.fetch '+refs/tags/*:refs/tags/*' || return $RC_DAMAGE
 	git -C "$1" config --add remote.origin.fetch '+refs/pull/*/head:refs/remotes/origin/pull/*/head' || return $RC_DAMAGE
 	git -C "$1" config --add remote.origin.fetch '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' || return $RC_DAMAGE
 }
@@ -260,7 +264,7 @@ ensure_ref_repo() {
 	RC=0; check_stored_identity "$1" || RC=$?
 	[ "$RC" -eq "$RC_INVALID" ] && return $RC
 	# A config git cannot parse kills every command including the init that
-	# would repair it. Salvage a url with grep to keep the no-rebind
+	# would repair it. Salvage origin's url by hand to keep the no-rebind
 	# guarantee, then move the file aside so the repair can run at all.
 	if [ -f "$1/config" ] && ! git config --includes --file "$1/config" --list >/dev/null 2>&1; then
 		if grep -qiE '^[[:space:]]*\[include' "$1/config"; then
