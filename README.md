@@ -1,4 +1,4 @@
-# checkout@v2
+# checkout@v3
 Fast and simple GitHub action to checkout large Git repos using --reference
 
 It also saves space significantly.
@@ -7,7 +7,7 @@ Note: requires git version >= 2.35
 
 # Usage
 ```yaml
-- uses: tempest-tech-ltd/checkout@v2
+- uses: tempest-tech-ltd/checkout@v3
   with:
     # GitHub repository name (with owner) or direct Git repository URL
     # Examples: tempest-tech-ltd/checkout, https://git.example.com/repo.git
@@ -90,7 +90,7 @@ for its duration.
 
 ## Typical checkout
 ```yaml
-- uses: tempest-tech-ltd/checkout@v2
+- uses: tempest-tech-ltd/checkout@v3
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
     path: ${{ github.ref_name }}/src
@@ -98,7 +98,7 @@ for its duration.
 
 ## Checkout another branch, preserving build artifacts
 ```yaml
-- uses: tempest-tech-ltd/checkout@v2
+- uses: tempest-tech-ltd/checkout@v3
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
     path: abranch-src
@@ -108,21 +108,21 @@ for its duration.
 
 ## Fetch or update reference (common) git directory only
 ```yaml
-- uses: tempest-tech-ltd/checkout@v2
+- uses: tempest-tech-ltd/checkout@v3
   with:
     token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## Fetch or update reference (common) git directory only of a public project
 ```yaml
-- uses: tempest-tech-ltd/checkout@v2
+- uses: tempest-tech-ltd/checkout@v3
   with:
     repository: chromium/chromium
 ```
 
 ## Checkout from a direct Git URL
 ```yaml
-- uses: tempest-tech-ltd/checkout@v2
+- uses: tempest-tech-ltd/checkout@v3
   with:
     repository: https://git.example.com/my-repo.git
     path: my-repo-src

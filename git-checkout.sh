@@ -18,6 +18,7 @@ RC_INVALID=2    # the caller asked for something impossible - not repairable
 
 usage() {
 	echo Usage: `basename $0` "[--repo REPO_URL] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
+	echo "Exit: 0 ok, $RC_DAMAGE repository damaged beyond repair, $RC_INVALID invalid invocation"
 	exit $RC_INVALID
 }
 
@@ -99,11 +100,11 @@ check_stored_identity() {
 	[ -f "$CFG" ] || CFG=$1/.git/config
 	# --get returns the last value while fetch uses the first, so more than
 	# one url means the check and the fetch could disagree.
-	COUNT=$(git config --file "$CFG" --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
-	CURRENT=$(git config --file "$CFG" --get-all remote.origin.url 2>/dev/null | head -1)
+	COUNT=$(git config --includes --file "$CFG" --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
+	CURRENT=$(git config --includes --file "$CFG" --get-all remote.origin.url 2>/dev/null | head -1)
 	[ -z "$CURRENT" ] && return $RC_DAMAGE
 	if [ "$COUNT" -gt 1 ]; then
-		echo "Error: $1 has more than one origin url" >&2
+		echo "Error: $1 has more than one distinct origin url" >&2
 		return $RC_INVALID
 	fi
 	[ -z "$URL" ] && URL=$CURRENT && return 0
@@ -115,11 +116,11 @@ check_stored_identity() {
 # RC_INVALID when the repo belongs to a different remote: rebinding it would
 # point every checkout sharing this store at another project.
 check_identity() {
-	COUNT=$(git -C "$1" config --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
-	CURRENT=$(git -C "$1" config --get-all remote.origin.url 2>/dev/null | head -1)
+	COUNT=$(git -C "$1" config --local --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
+	CURRENT=$(git -C "$1" config --local --get-all remote.origin.url 2>/dev/null | head -1)
 	[ -z "$CURRENT" ] && return $RC_DAMAGE
 	if [ "$COUNT" -gt 1 ]; then
-		echo "Error: $1 has more than one origin url" >&2
+		echo "Error: $1 has more than one distinct origin url" >&2
 		return $RC_INVALID
 	fi
 	[ -z "$URL" ] && URL=$CURRENT && return 0
@@ -140,9 +141,15 @@ check_alternates() {
 	[ -s "$ALT" ] || return $RC_DAMAGE
 	BORROWED=$(cat "$ALT") || return $RC_DAMAGE
 	EXPECTED=$(objects_dir "$REF_DIR") || return $RC_DAMAGE
-	[ "$BORROWED" = "$EXPECTED" ] && return 0
-	echo "Error: $1 borrows objects from $BORROWED, not from $EXPECTED" >&2
-	return $RC_INVALID
+	# Compared as directories, not as strings: an older version of this
+	# script wrote the logical path, so a store reached through a symlink
+	# spells the same directory differently and a healthy checkout would
+	# otherwise be refused for good.
+	[ "$(abs_path "$BORROWED")" = "$(abs_path "$EXPECTED")" ] && return 0
+	# Damage, not a caller mistake: recreating a target's .git never rebinds
+	# the shared store - that firewall is the reference dir's identity check.
+	echo "Warning: $1 borrows objects from $BORROWED, not from $EXPECTED" >&2
+	return $RC_DAMAGE
 }
 
 # --- configuration --------------------------------------------------------
@@ -166,32 +173,40 @@ set_refspecs() {
 	git -C "$1" config --add remote.origin.fetch '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' || return $RC_DAMAGE
 }
 
-# The credential goes to the one fetch that needs it and is never written to
-# a config file: the reference dir outlives the job, and a token left in it
-# stays readable by every later step. xtrace is off around the token and its
-# encoding, which a runner is not obliged to mask.
+# The url and the refspecs are given on the command line, so the fetch cannot
+# be steered by configuration this script does not own: a negative refspec or
+# a second url reaching the repo through include.path would otherwise decide
+# what gets fetched, and a checkout of an old commit would look like success.
+#
+# The credential goes to this one command through the environment - not into a
+# config file, which the reference dir would keep for every later step, and not
+# into argv, which is readable from any process listing. xtrace is off around
+# the token and its encoding, which a runner is not obliged to mask.
 fetch_repo() {
 	DIR=$1; shift
 	XTRACE=
 	case $- in *x*) XTRACE=1; set +x ;; esac
-	AUTH=
+	GIT_CONFIG_COUNT=0
 	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
-		AUTH="http.extraHeader=Authorization: basic $(echo -n "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')"
+		GIT_CONFIG_COUNT=1
+		GIT_CONFIG_KEY_0=http.extraHeader
+		GIT_CONFIG_VALUE_0="Authorization: basic $(printf '%s' "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')"
+		export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 	fi
 	# Anything an older version of this script persisted.
 	git -C "$DIR" config --unset-all http.extraHeader 2>/dev/null || true
+	[ "$XTRACE" ] && set -x
 
-	retries=5
-	delay=2
+	retries=${GIT_FETCH_RETRIES:-5}
+	delay=${GIT_FETCH_DELAY:-2}
 	while :; do
-		if [ "$AUTH" ]; then
-			git -C "$DIR" -c "$AUTH" "$@" && { [ "$XTRACE" ] && set -x; return 0; }
-		else
-			git -C "$DIR" "$@" && { [ "$XTRACE" ] && set -x; return 0; }
-		fi
+		git -C "$DIR" "$@" "$URL" \
+			'+refs/heads/*:refs/remotes/origin/*' \
+			'+refs/pull/*/head:refs/remotes/origin/pull/*/head' \
+			'+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' && { unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; return 0; }
 		retries=$((retries - 1))
 		if [ "$retries" -le 0 ]; then
-			[ "$XTRACE" ] && set -x
+			unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 			return $RC_DAMAGE
 		fi
 		echo "Git command failed. Retrying in ${delay}s..."
@@ -216,14 +231,14 @@ create_ref_repo() {
 	mkdir -p "$1" || return $RC_DAMAGE
 	git -C "$1" init --bare || return $RC_DAMAGE
 	set_origin "$1" || return $RC_DAMAGE
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force origin
+	fetch_repo "$1" fetch --prune --prune-tags --tags --force
 }
 
 # 'git init --bare' over a damaged bare repo leaves its objects alone, so the
 # repair is the create path minus the destruction. The store is never
 # deleted: every target borrowing from it would lose its objects.
 ensure_ref_repo() {
-	[ -d "$1" ] || { create_ref_repo "$1"; return $?; }
+	[ -z "$REF_EXISTED" ] && { create_ref_repo "$1"; return $?; }
 	# A worktree is not a reference repo: alternates would name a directory
 	# that does not exist, and the cache would silently do nothing.
 	if [ -e "$1/.git" ]; then
@@ -233,6 +248,18 @@ ensure_ref_repo() {
 	# Identity first, so a repo too damaged to open cannot be rebound.
 	RC=0; check_stored_identity "$1" || RC=$?
 	[ "$RC" -eq "$RC_INVALID" ] && return $RC
+	# A config git cannot parse kills every command including the init that
+	# would repair it. Salvage a url with grep to keep the no-rebind
+	# guarantee, then move the file aside so the repair can run at all.
+	if [ -f "$1/config" ] && ! git config --includes --file "$1/config" --list >/dev/null 2>&1; then
+		SALVAGED=$(sed -n 's/^[[:space:]]*url[[:space:]]*=[[:space:]]*//p' "$1/config" | head -1)
+		if [ "$SALVAGED" ] && [ "$SALVAGED" != "$URL" ]; then
+			echo "Error: $1 has an unreadable config naming $SALVAGED, not $URL" >&2
+			return $RC_INVALID
+		fi
+		echo "Warning: $1 has an unreadable config, moving it aside" >&2
+		mv -- "$1/config" "$1/config.broken" || return $RC_DAMAGE
+	fi
 	# Then the locks, before anything else touches the repo: a config.lock
 	# left by a killed process makes even 'git init --bare' fail, and the
 	# repair below would be unable to run for good. The dir is the gitdir
@@ -243,7 +270,7 @@ ensure_ref_repo() {
 		[ "$RC" -eq "$RC_INVALID" ] && return $RC
 		if [ "$RC" -eq 0 ]; then
 			set_refspecs "$1" || return $?
-			fetch_repo "$1" -c gc.auto=0 fetch --prune --prune-tags --tags --force origin && return 0
+			fetch_repo "$1" -c gc.auto=0 fetch --prune --prune-tags --tags --force && return 0
 			echo "Warning: $1 could not be updated, reinitializing it in place (existing objects are kept)"
 		else
 			# Fetching without an origin url succeeds and does nothing at
@@ -267,7 +294,7 @@ create_target_repo() {
 	set_origin "$1" || return $RC_DAMAGE
 	GD=$(git -C "$1" rev-parse --absolute-git-dir) || return $RC_DAMAGE
 	echo "$REF_OBJECTS" > "$GD/objects/info/alternates" || return $RC_DAMAGE
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force origin
+	fetch_repo "$1" fetch --prune --prune-tags --tags --force
 }
 
 # Recreates .git and refetches, keeping the working tree: its untracked
@@ -280,7 +307,7 @@ recover_target_repo() {
 	TARGET_ABS=$(abs_path "$1")
 	case "$TARGET_ABS" in
 		"" | / | ?:[/\\] )
-			echo "Error: refusing to recover unsafe target dir: '$1'"
+			echo "Error: refusing to recover unsafe target dir: '$1'" >&2
 			return $RC_INVALID ;;
 	esac
 	RECOVERED="recovered"
@@ -350,12 +377,17 @@ resolve_ref() {
 				echo "refs/tags/$2"
 				return 0
 			fi
+			# rev-parse resolves refs before object ids, and this script
+			# creates a local branch for every branch it builds - so an
+			# all-hex branch name deleted upstream would resolve to that
+			# leftover. The object id has to match what was asked for.
 			case "$2" in
 				"" | *[!0-9a-fA-F]* ) ;;
-				* ) if git -C "$1" rev-parse --verify --quiet "$2^{commit}" >/dev/null 2>&1; then
-					echo "$2"
-					return 0
-				fi ;;
+				* ) LOWER=$(printf '%s' "$2" | tr 'A-F' 'a-f')
+					FULL=$(git -C "$1" rev-parse --verify --quiet "$LOWER^{commit}" 2>/dev/null)
+					case "$FULL" in
+						"$LOWER"* ) echo "$FULL"; return 0 ;;
+					esac ;;
 			esac ;;
 	esac
 	echo "Error: target ref does not exist: $2" >&2
@@ -381,17 +413,26 @@ checkout() {
 	WANT=$(git -C "$1" rev-parse "$RESOLVED^{commit}") || return $RC_DAMAGE
 	HAVE=$(git -C "$1" rev-parse HEAD) || return $RC_DAMAGE
 	[ "$WANT" = "$HAVE" ] && return 0
-	echo "Error: HEAD is $HAVE, expected $WANT for $2"
+	echo "Error: HEAD is $HAVE, expected $WANT for $2" >&2
 	return $RC_DAMAGE
 }
 
 # Everything done to a target that already exists, in order, so the
 # dispatcher can retry the lot after a repair instead of restating the rule
 # at every step.
+# A tracked file marked skip-worktree is left alone by clean, reset and a
+# forced checkout alike, so the run would report success over content that is
+# not the ref's. Sparse checkout works through the same bit. Recreating .git
+# clears both, and the objects come back from the reference store.
+has_skip_worktree() {
+	git -C "$1" ls-files -t 2>/dev/null | grep -q '^S '
+}
+
 target_steps() {
 	clear_stale_locks "$1"
+	has_skip_worktree "$1" && { echo "Warning: $1 has files marked skip-worktree" >&2; return $RC_DAMAGE; }
 	set_refspecs "$1" || return $?
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force --recurse-submodules=no origin || return $?
+	fetch_repo "$1" fetch --prune --prune-tags --tags --force --recurse-submodules=no || return $?
 	if [ "$CLEAN" ]; then
 		clean "$1" || return $?
 	fi
@@ -459,7 +500,9 @@ fi
 
 # Recorded before prepare_dir, which creates the dir in order to resolve it.
 TARGET_EXISTED=
+REF_EXISTED=
 [ "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ] && TARGET_EXISTED=1
+[ "$REF_DIR" ] && [ -d "$REF_DIR" ] && REF_EXISTED=1
 
 # From here on both are canonical: every git, find and rm below gets the path
 # that was actually checked, not the string the caller wrote.

@@ -295,6 +295,63 @@ git -C "$W/src" config --add remote.origin.fetch 'this is not a refspec'
 RUN "$W" "${ARGS[@]}";                       rc_is "a malformed refspec added by hand" 0
 is  "  and the config is back to ours" 3 "$(git -C "$W/src" config --get-all remote.origin.fetch | wc -l | tr -d ' ')"
 
+# --- an alternates file written by an older version --------------------
+rm -rf "$T/sym"; mkdir -p "$T/sym/real"; ln -s real "$T/sym/link"
+( cd "$T/sym/link" && "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir r.git --target-dir s --target-ref main ) >/dev/null 2>&1
+printf '%s\n' "$T/sym/link/r.git/objects" > "$T/sym/real/s/.git/objects/info/alternates"
+OUT=$(cd "$T/sym/link" && "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir r.git --target-dir s --target-ref main 2>&1); RC=$?
+rc_is "an alternates path that differs only by a symlink" 0
+hasnt "  is not treated as belonging elsewhere" "borrows objects from"
+
+# --- an all-hex branch name deleted upstream ---------------------------
+cd "$T/seed"; git checkout -q main; echo hexy > a; git commit -qam hexy
+git push -q "$T/origin.git" HEAD:refs/heads/cafe; git checkout -q main; cd /
+rm -rf "$W/srcH"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref cafe
+rc_is "prep: a hex-named branch" 0
+git -C "$T/seed" push -q "$T/origin.git" --delete cafe
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref main
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref cafe
+[ "$RC" != 0 ] && ok "a hex-named branch deleted upstream fails" || bad "a hex-named branch deleted upstream fails (rc=$RC)"
+
+# --- a commit id still works -------------------------------------------
+SHA_MAIN=$(git -C "$T/seed" rev-parse HEAD)
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref "$SHA_MAIN"
+rc_is "a full commit id" 0
+is  "  lands on that commit" "$SHA_MAIN" "$(git -C "$W/srcH" rev-parse HEAD)"
+
+# --- skip-worktree and sparse checkout ---------------------------------
+RUN "$W" "${ARGS[@]}"
+git -C "$W/src" update-index --skip-worktree a
+echo LOCAL > "$W/src/a"
+RUN "$W" "${ARGS[@]}";                       rc_is "a tracked file marked skip-worktree" 0
+is  "  comes back at the ref's content" seven "$(cat "$W/src/a")"
+
+git -C "$W/src" sparse-checkout init --cone >/dev/null 2>&1
+git -C "$W/src" sparse-checkout set sub >/dev/null 2>&1
+RUN "$W" "${ARGS[@]}";                       rc_is "a sparse checkout" 0
+[ -f "$W/src/a" ] && ok "  restores every tracked file" || bad "  restores every tracked file"
+
+# --- configuration reaching the repo through include.path --------------
+printf '[remote "origin"]\n\tfetch = ^refs/heads/main\n' > "$T/extra-config"
+git -C "$W/src" config include.path "$T/extra-config"
+cd "$T/seed"; echo eight > a; git commit -qam c8; git push -q "$T/origin.git" main; cd /
+RUN "$W" "${ARGS[@]}";                       rc_is "an included negative refspec" 0
+is  "  does not hold the checkout back" eight "$(cat "$W/src/a")"
+git -C "$W/src" config --unset include.path
+
+# --- a reference config git cannot parse -------------------------------
+rm -rf "$W/refBad"
+RUN "$W" --repo "$T/origin.git" --ref-dir refBad;  rc_is "prep: a reference dir" 0
+printf '[' > "$W/refBad/config"
+RUN "$W" --repo "$T/origin.git" --ref-dir refBad
+rc_is "an unreadable reference config is repaired" 0
+is  "  and the origin is ours" "$T/origin.git" "$(git -C "$W/refBad" config --get remote.origin.url)"
+
+printf '[remote "origin"]\n\turl = %s\n[' "$T/second.git" > "$W/refBad/config"
+RUN "$W" --repo "$T/origin.git" --ref-dir refBad
+[ "$RC" != 0 ] && ok "an unreadable config naming another repo is refused" || bad "an unreadable config naming another repo is refused (rc=$RC)"
+
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"
 OUT=$(cd "$W" && GITHUB_TOKEN=ghs_TOKENVALUE "$SH" "$SCRIPT" --repo "$T/origin.git" \
