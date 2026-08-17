@@ -412,6 +412,12 @@ RUN "$W" "${ARGS[@]}"
 has "  and says what it was rewritten to" "rewrites"
 is  "  the checkout is left as it was" eight "$(cat "$W/src/a")"
 git -C "$W/src" config --unset "url.$T/rewritten.git.insteadOf"
+
+git -C "$W/ref.git" config "url.$T/rewritten.git.insteadOf" "$T/origin.git"
+RUN "$W" "${ARGS[@]}"
+[ "$RC" != 0 ] && ok "the same for the reference dir" || bad "the same for the reference dir (rc=$RC)"
+hasnt "  without announcing a repair first" "$REPAIR"
+git -C "$W/ref.git" config --unset "url.$T/rewritten.git.insteadOf"
 RUN "$W" "${ARGS[@]}";                       rc_is "  and works again once it is gone" 0
 
 # --- a .git file pointing at another checkout ---------------------------
@@ -428,6 +434,26 @@ is  "  and the ref's content" nine "$(cat "$W/srcG2/a")"
 is  "  the other checkout keeps its HEAD" "$G_HEAD" "$(git -C "$W/srcG" rev-parse HEAD)"
 is  "  and its work tree" "" "$(git -C "$W/srcG" status --porcelain)"
 
+# --- a .git symlinked into another checkout -----------------------------
+rm -rf "$W/srcG3"
+mkdir -p "$W/srcG3"; ln -s "$W/srcG/.git" "$W/srcG3/.git"; echo OLD > "$W/srcG3/a"
+G_HEAD=$(git -C "$W/srcG" rev-parse HEAD)
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcG3 --target-ref main
+rc_is "a target whose .git is a symlink" 0
+[ -L "$W/srcG3/.git" ] && bad "  gets a git dir of its own" || ok "  gets a git dir of its own"
+is  "  and the ref's content" nine "$(cat "$W/srcG3/a")"
+is  "  the other checkout keeps its HEAD" "$G_HEAD" "$(git -C "$W/srcG" rev-parse HEAD)"
+is  "  and its work tree" "" "$(git -C "$W/srcG" status --porcelain)"
+
+# --- a .git file naming a checkout of another repository ----------------
+rm -rf "$W/srcO" "$W/srcO2" "$W/refO"
+RUN "$W" --repo "$T/second.git" --ref-dir refO --target-dir srcO
+rc_is "prep: a checkout of another repository" 0
+mkdir -p "$W/srcO2"; echo "gitdir: $W/srcO/.git" > "$W/srcO2/.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcO2 --target-ref main
+rc_is "a .git naming another repository's checkout is repaired, not refused" 0
+is  "  and gets the ref's content" nine "$(cat "$W/srcO2/a")"
+
 # --- a replacement ref in a reused target -------------------------------
 rm -rf "$W/srcR"
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcR --target-ref main
@@ -438,6 +464,7 @@ git -C "$W/srcR" replace "$R_OLD" "$R_NEW" >/dev/null 2>&1
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcR --target-ref "$R_OLD"
 rc_is "a commit with a replacement ref" 0
 is  "  checks out the commit that was asked for" eight "$(cat "$W/srcR/a")"
+is  "  and does not leave the replacement behind" "" "$(git -C "$W/srcR" for-each-ref --format='%(refname)' refs/replace)"
 
 # --- an unreadable config whose section names are upper case ------------
 rm -rf "$W/refB3"

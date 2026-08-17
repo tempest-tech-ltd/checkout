@@ -83,9 +83,15 @@ in the machine's config or the checkout's own - is refused rather than followed.
 Otherwise the store would keep the name of one repository and the objects of
 another, with every check still passing.
 
-The target owns its `.git`: a directory, not a gitfile pointing into another
-checkout, and not a git dir shared with one. A target that shares metadata is
-rebuilt with its own, and the checkout it borrowed from is left alone.
+The target owns its `.git`: a directory of its own, not a symlink and not a
+gitfile pointing into another checkout, and not a git dir shared with one. A
+target that shares metadata is rebuilt with its own, and the checkout it
+borrowed from is left alone.
+
+Replacement refs are removed from the target. `refs/replace/*` substitutes one
+object for another in everything git reads, so one left in a reused checkout
+would hand a different tree to the build steps that run after this action, on
+a checkout that verified as correct.
 
 Tags are mirrored from the remote, so a tag deleted upstream is deleted here,
 and a tag created locally in the checkout does not survive the next run.

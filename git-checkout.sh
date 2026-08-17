@@ -187,6 +187,17 @@ set_origin() {
 # The stored refspecs are for whoever opens the repo by hand later; the fetch
 # below passes its own on the command line and never reads these. They are kept
 # equal to it so a manual fetch does the same thing.
+# Replacement refs are the action's to remove, the way origin's config is:
+# no refspec carries them, so --prune cannot see one, and a replacement left
+# in a reused checkout outlives the run. Not applying them - which is what
+# GIT_NO_REPLACE_OBJECTS does - only covers this script; every git command
+# the job runs afterwards would still read the tree it was pointed at.
+clear_replace_refs() {
+	git -C "$1" for-each-ref --format='delete %(refname)' refs/replace 2>/dev/null \
+		| git -C "$1" update-ref --stdin 2>/dev/null
+	return 0
+}
+
 set_refspecs() {
 	git -C "$1" config --unset-all remote.origin.fetch 2>/dev/null || true
 	git -C "$1" config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' || return $RC_DAMAGE
@@ -323,7 +334,11 @@ ensure_ref_repo() {
 		[ "$RC" -eq "$RC_INVALID" ] && return $RC
 		if [ "$RC" -eq 0 ]; then
 			set_refspecs "$1" || return $?
-			fetch_repo "$1" -c gc.auto=0 fetch --prune --force && return 0
+			RC=0; fetch_repo "$1" -c gc.auto=0 fetch --prune --force || RC=$?
+			[ "$RC" -eq 0 ] && return 0
+			# A refused invocation is not something a repair answers, and
+			# announcing one before refusing reads as if it had happened.
+			[ "$RC" -eq "$RC_INVALID" ] && return $RC
 			echo "Warning: $1 could not be updated, reinitializing it in place (existing objects are kept)"
 		else
 			# Fetching without an origin url succeeds and does nothing at
@@ -485,6 +500,10 @@ checkout() {
 # Checked before anything is touched, and repairable: recovery deletes the
 # gitfile, not the repo it names.
 check_target_layout() {
+	# Before -d, which follows the link, as does every path comparison
+	# below: a .git symlinked into another checkout answers all of them
+	# with that checkout's own answers.
+	[ -L "$1/.git" ] && { echo "Warning: $1 reaches its .git through a symlink" >&2; return $RC_DAMAGE; }
 	[ -d "$1/.git" ] || { echo "Warning: $1 has no .git directory of its own" >&2; return $RC_DAMAGE; }
 	GD=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return $RC_DAMAGE
 	GD=$(abs_path "$GD")
@@ -518,6 +537,7 @@ target_steps() {
 	check_worktree_root "$1" || return $?
 	clear_stale_locks "$1"
 	has_skip_worktree "$1" && { echo "Warning: $1 has files marked skip-worktree" >&2; return $RC_DAMAGE; }
+	clear_replace_refs "$1"
 	set_refspecs "$1" || return $?
 	fetch_repo "$1" fetch --prune --force --recurse-submodules=no || return $?
 	if [ "$CLEAN" ]; then
@@ -624,14 +644,21 @@ elif ! is_repo "$TARGET_DIR" .git; then
 	recover_target_repo "$TARGET_DIR" || exit $?
 else
 	# A check that reports damage earns a repair; one that reports an
-	# invalid invocation stops the run.
+	# invalid invocation stops the run. The layout comes first: identity
+	# and alternates read through whatever .git resolves to, so a target
+	# borrowing another checkout's metadata would be judged - and refused
+	# as someone else's repository - on that checkout's answers, when all
+	# it needs is its own .git.
 	RC=0
-	check_identity "$TARGET_DIR" || RC=$?
-	[ "$RC" -eq 0 ] && { check_alternates "$TARGET_DIR" || RC=$?; }
+	check_target_layout "$TARGET_DIR" || RC=$?
+	if [ "$RC" -eq 0 ]; then
+		check_identity "$TARGET_DIR" || RC=$?
+		[ "$RC" -eq 0 ] && { check_alternates "$TARGET_DIR" || RC=$?; }
+		[ "$RC" -ne 0 ] && [ "$RC" -ne "$RC_INVALID" ] && echo "Warning: $TARGET_DIR has no usable origin"
+	fi
 	if [ "$RC" -eq "$RC_INVALID" ]; then
 		exit $RC
 	elif [ "$RC" -ne 0 ]; then
-		echo "Warning: $TARGET_DIR has no usable origin"
 		recover_target_repo "$TARGET_DIR" || exit $?
 	fi
 fi
