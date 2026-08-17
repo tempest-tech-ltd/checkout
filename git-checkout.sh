@@ -13,6 +13,9 @@
 # it does not apply inside a function called from an AND-OR list, which is
 # where all of these are called from.
 
+# An inherited git context would silently redirect every command below.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+
 RC_DAMAGE=1     # local metadata are broken - repairable
 RC_INVALID=2    # the caller asked for something impossible - not repairable
 
@@ -154,7 +157,9 @@ check_alternates() {
 
 # --- configuration --------------------------------------------------------
 
-# origin is the action's to define, not a set to append to. An extra fetch
+# Kept in the config for anyone reading the repo by hand; the fetch passes its
+# own refspecs and does not consult these. origin is the action's to define,
+# not a set to append to. An extra fetch
 # refspec is enough to break a run in a way nothing else notices: a negative
 # one ('^refs/heads/main') keeps the branch out of the fetch, so the remote
 # ref stays behind and the checkout - and the HEAD check, reading that same
@@ -173,6 +178,11 @@ set_refspecs() {
 	git -C "$1" config --add remote.origin.fetch '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' || return $RC_DAMAGE
 }
 
+# Tags come through a refspec of their own rather than --tags: git only prunes
+# tags it fetched by refspec, and --prune-tags is ignored outright once
+# refspecs are given on the command line - a tag deleted upstream would live on
+# and still be checked out.
+#
 # The url and the refspecs are given on the command line, so the fetch cannot
 # be steered by configuration this script does not own: a negative refspec or
 # a second url reaching the repo through include.path would otherwise decide
@@ -202,6 +212,7 @@ fetch_repo() {
 	while :; do
 		git -C "$DIR" "$@" "$URL" \
 			'+refs/heads/*:refs/remotes/origin/*' \
+			'+refs/tags/*:refs/tags/*' \
 			'+refs/pull/*/head:refs/remotes/origin/pull/*/head' \
 			'+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' && { unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; return 0; }
 		retries=$((retries - 1))
@@ -231,7 +242,7 @@ create_ref_repo() {
 	mkdir -p "$1" || return $RC_DAMAGE
 	git -C "$1" init --bare || return $RC_DAMAGE
 	set_origin "$1" || return $RC_DAMAGE
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force
+	fetch_repo "$1" fetch --prune --force
 }
 
 # 'git init --bare' over a damaged bare repo leaves its objects alone, so the
@@ -252,9 +263,20 @@ ensure_ref_repo() {
 	# would repair it. Salvage a url with grep to keep the no-rebind
 	# guarantee, then move the file aside so the repair can run at all.
 	if [ -f "$1/config" ] && ! git config --includes --file "$1/config" --list >/dev/null 2>&1; then
-		SALVAGED=$(sed -n 's/^[[:space:]]*url[[:space:]]*=[[:space:]]*//p' "$1/config" | head -1)
+		if grep -qiE '^[[:space:]]*\[include' "$1/config"; then
+			echo "Error: $1 has an unreadable config with includes; its identity cannot be established" >&2
+			return $RC_INVALID
+		fi
+		SALVAGED=$(awk '
+			/^[[:space:]]*\[/ { in_origin = ($0 ~ /^[[:space:]]*\[remote[[:space:]]+"origin"\]/) }
+			in_origin && /^[[:space:]]*url[[:space:]]*=/ {
+				sub(/^[[:space:]]*url[[:space:]]*=[[:space:]]*/, ""); print; exit
+			}' "$1/config")
+		# A url that disagrees means the store belongs to someone else and
+		# must not be rebound. Nothing readable at all is a different thing:
+		# there is no identity to protect, only a dir to repair.
 		if [ "$SALVAGED" ] && [ "$SALVAGED" != "$URL" ]; then
-			echo "Error: $1 has an unreadable config naming $SALVAGED, not $URL" >&2
+			echo "Error: $1 has an unreadable config; its origin reads '$SALVAGED', not '$URL'" >&2
 			return $RC_INVALID
 		fi
 		echo "Warning: $1 has an unreadable config, moving it aside" >&2
@@ -270,7 +292,7 @@ ensure_ref_repo() {
 		[ "$RC" -eq "$RC_INVALID" ] && return $RC
 		if [ "$RC" -eq 0 ]; then
 			set_refspecs "$1" || return $?
-			fetch_repo "$1" -c gc.auto=0 fetch --prune --prune-tags --tags --force && return 0
+			fetch_repo "$1" -c gc.auto=0 fetch --prune --force && return 0
 			echo "Warning: $1 could not be updated, reinitializing it in place (existing objects are kept)"
 		else
 			# Fetching without an origin url succeeds and does nothing at
@@ -294,7 +316,7 @@ create_target_repo() {
 	set_origin "$1" || return $RC_DAMAGE
 	GD=$(git -C "$1" rev-parse --absolute-git-dir) || return $RC_DAMAGE
 	echo "$REF_OBJECTS" > "$GD/objects/info/alternates" || return $RC_DAMAGE
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force
+	fetch_repo "$1" fetch --prune --force
 }
 
 # Recreates .git and refetches, keeping the working tree: its untracked
@@ -420,6 +442,17 @@ checkout() {
 # Everything done to a target that already exists, in order, so the
 # dispatcher can retry the lot after a repair instead of restating the rule
 # at every step.
+# core.worktree points git's idea of the work tree somewhere else, and every
+# command here would follow it: clean would wipe that other directory and the
+# checkout would write there, while the dir the caller named keeps its old
+# content and HEAD still matches. Recreating .git drops the setting.
+check_worktree_root() {
+	TOP=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return $RC_DAMAGE
+	[ "$(abs_path "$TOP")" = "$1" ] && return 0
+	echo "Warning: $1 uses a different work tree: $TOP" >&2
+	return $RC_DAMAGE
+}
+
 # A tracked file marked skip-worktree is left alone by clean, reset and a
 # forced checkout alike, so the run would report success over content that is
 # not the ref's. Sparse checkout works through the same bit. Recreating .git
@@ -430,14 +463,19 @@ has_skip_worktree() {
 
 target_steps() {
 	clear_stale_locks "$1"
+	check_worktree_root "$1" || return $?
 	has_skip_worktree "$1" && { echo "Warning: $1 has files marked skip-worktree" >&2; return $RC_DAMAGE; }
 	set_refspecs "$1" || return $?
-	fetch_repo "$1" fetch --prune --prune-tags --tags --force --recurse-submodules=no || return $?
+	fetch_repo "$1" fetch --prune --force --recurse-submodules=no || return $?
 	if [ "$CLEAN" ]; then
 		clean "$1" || return $?
 	fi
 	if [ "$TARGET_REF" ]; then
 		checkout "$1" "$TARGET_REF" || return $?
+		# A sparse checkout with nothing currently excluded leaves no trace
+		# before the fetch, and only marks paths the new commit adds. The
+		# invariant is that a finished target holds none of them at all.
+		has_skip_worktree "$1" && { echo "Warning: the checkout left files marked skip-worktree in $1" >&2; return $RC_DAMAGE; }
 	fi
 	return 0
 }

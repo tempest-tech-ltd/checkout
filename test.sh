@@ -352,6 +352,48 @@ printf '[remote "origin"]\n\turl = %s\n[' "$T/second.git" > "$W/refBad/config"
 RUN "$W" --repo "$T/origin.git" --ref-dir refBad
 [ "$RC" != 0 ] && ok "an unreadable config naming another repo is refused" || bad "an unreadable config naming another repo is refused (rc=$RC)"
 
+# --- a tag deleted upstream ---------------------------------------------
+cd "$T/seed"; git checkout -q main; git tag doomed; git push -q "$T/origin.git" refs/tags/doomed; cd /
+rm -rf "$W/srcT2"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcT2 --target-ref refs/tags/doomed
+rc_is "prep: a tag" 0
+git -C "$T/seed" push -q "$T/origin.git" --delete refs/tags/doomed
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcT2 --target-ref main
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcT2 --target-ref refs/tags/doomed
+[ "$RC" != 0 ] && ok "a tag deleted upstream fails" || bad "a tag deleted upstream fails (rc=$RC)"
+
+# --- a work tree pointed somewhere else ---------------------------------
+mkdir -p "$T/elsewhere"; echo SENTINEL > "$T/elsewhere/artifact"
+RUN "$W" "${ARGS[@]}"
+git -C "$W/src" config core.worktree "$T/elsewhere"
+RUN "$W" "${ARGS[@]}" --clean;               rc_is "a redirected core.worktree" 0
+is  "  leaves the other directory alone" SENTINEL "$(cat "$T/elsewhere/artifact" 2>/dev/null)"
+is  "  and checks out where it was told" eight "$(cat "$W/src/a")"
+
+# --- sparse checkout that only bites on the new commit ------------------
+rm -rf "$W/srcS"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcS --target-ref main
+rc_is "prep: a target to make sparse" 0
+git -C "$W/srcS" sparse-checkout init --cone >/dev/null 2>&1
+git -C "$W/srcS" sparse-checkout set sub >/dev/null 2>&1
+git -C "$W/srcS" checkout -q -- . 2>/dev/null || true
+cd "$T/seed"; mkdir -p outside; echo out > outside/b; git add outside; git commit -qm outside
+git push -q "$T/origin.git" main; cd /
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcS --target-ref main
+rc_is "a sparse checkout that only excludes the new commit's files" 0
+[ -f "$W/srcS/outside/b" ] && ok "  brings the new file in anyway" || bad "  brings the new file in anyway"
+
+# --- an unreadable config whose identity is not origin's ----------------
+rm -rf "$W/refB2"
+RUN "$W" --repo "$T/origin.git" --ref-dir refB2;  rc_is "prep: a reference dir" 0
+printf '[remote "backup"]\n\turl = %s\n[\n[remote "origin"]\n\turl = %s\n' "$T/origin.git" "$T/second.git" > "$W/refB2/config"
+RUN "$W" --repo "$T/origin.git" --ref-dir refB2
+[ "$RC" != 0 ] && ok "an unreadable config is judged by origin, not the first url" || bad "an unreadable config is judged by origin, not the first url (rc=$RC)"
+
+printf '[include]\n\tpath = /nowhere\n[\n' > "$W/refB2/config"
+RUN "$W" --repo "$T/origin.git" --ref-dir refB2
+[ "$RC" != 0 ] && ok "an unreadable config with includes is refused" || bad "an unreadable config with includes is refused (rc=$RC)"
+
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"
 OUT=$(cd "$W" && GITHUB_TOKEN=ghs_TOKENVALUE "$SH" "$SCRIPT" --repo "$T/origin.git" \
