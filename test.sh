@@ -19,7 +19,7 @@ hasnt() { echo "$OUT" | grep -q "$2" && bad "$1 (output has '$2')" || ok "$1"; }
 skip()  { SKIP=$((SKIP+1)); echo "skip - $1"; }
 # git-bash hands git a windows spelling of a posix path and gives it back that
 # way, so two strings can name one directory. Compare as directories.
-abspath() { ( cd "$1" 2>/dev/null && { [ "$MSYSTEM" ] && pwd -W || pwd -P; } ); }
+abspath() { ( cd "$1" 2>/dev/null && { [ "${MSYSTEM:-}" ] && pwd -W || pwd -P; } ); }
 is_path() {
 	[ "$2" = "$3" ] && { ok "$1"; return; }
 	A=$(abspath "$2"); B=$(abspath "$3")
@@ -178,8 +178,10 @@ printf '#!/bin/sh\necho "RM $*" >&2\n' > "$T/fakerm/rm"; chmod +x "$T/fakerm/rm"
 OUT=$(cd "$W" && PATH="$T/fakerm:$PATH" "$SH" "$SCRIPT" --repo "$T/origin.git" \
     --ref-dir ref.git --target-dir /tmp/.. --target-ref main 2>&1); RC=$?
 hasnt "a target dir resolving to the root is refused" "RM -rf /tmp/../.git"
-case "$(cd /tmp/.. 2>/dev/null && pwd)" in
-    / ) has "  and says so" "unsafe repository directory" ;;
+# Asked the way the script asks: on git-bash /tmp/.. is the MSYS root in
+# windows spelling, an ordinary directory, and there is nothing to refuse.
+case "$(abspath /tmp/..)" in
+    / | // | ?:[/\\] | ?:[/\\][/\\] ) has "  and says so" "unsafe repository directory" ;;
     * ) skip "  and says so ('..' reaches no root here)" ;;
 esac
 
