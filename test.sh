@@ -9,13 +9,22 @@ set -u
 SCRIPT=$(cd "$(dirname "$0")" && pwd)/git-checkout.sh
 SH=${SH:-bash}
 T=$(mktemp -d)
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 ok()    { PASS=$((PASS+1)); echo "ok   - $1"; }
 bad()   { FAIL=$((FAIL+1)); echo "FAIL - $1"; }
 is()    { [ "$2" = "$3" ] && ok "$1" || bad "$1 (want '$2', got '$3')"; }
 rc_is() { [ "$2" = "$RC" ] && ok "$1 (rc=$RC)" || bad "$1 (want rc=$2, got rc=$RC)"; }
 has()   { echo "$OUT" | grep -q "$2" && ok "$1" || bad "$1 (output lacks '$2')"; }
 hasnt() { echo "$OUT" | grep -q "$2" && bad "$1 (output has '$2')" || ok "$1"; }
+skip()  { SKIP=$((SKIP+1)); echo "skip - $1"; }
+# git-bash hands git a windows spelling of a posix path and gives it back that
+# way, so two strings can name one directory. Compare as directories.
+abspath() { ( cd "$1" 2>/dev/null && { [ "$MSYSTEM" ] && pwd -W || pwd -P; } ); }
+is_path() {
+	[ "$2" = "$3" ] && { ok "$1"; return; }
+	A=$(abspath "$2"); B=$(abspath "$3")
+	[ -n "$A" ] && [ "$A" = "$B" ] && ok "$1" || bad "$1 (want '$2', got '$3')"
+}
 
 RUN() { local wd=$1; shift; OUT=$(cd "$wd" && "$SH" "$SCRIPT" "$@" 2>&1); RC=$?; }
 
@@ -34,7 +43,12 @@ ARGS=(--repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref mai
 RECOVER="Warning: recovering"
 REPAIR="reinitializing it in place"
 
-echo "# checkout under $SH ($("$SH" -c 'echo $0') / git $(git --version | awk '{print $3}'))"
+# Where ln -s only copies - git-bash without winsymlinks:nativestrict - the
+# blocks that depend on real symlinks would pass without testing anything.
+if ln -s . "$T/symprobe" 2>/dev/null && [ -L "$T/symprobe" ]; then HAVE_SYMLINK=1; else HAVE_SYMLINK=; fi
+rm -f "$T/symprobe"
+
+echo "# checkout under $SH ($("$SH" -c 'echo $0') / git $(git --version | awk '{print $3}')${HAVE_SYMLINK:+, symlinks})"
 
 # --- the happy paths ----------------------------------------------------
 RUN "$W" "${ARGS[@]}";                       rc_is "fresh clone" 0
@@ -99,7 +113,7 @@ is  "  leaves targets able to read through alternates" two "$(git -C "$W/src" sh
 git -C "$W/ref.git" config --unset remote.origin.url
 git -C "$W/ref.git" config --unset-all remote.origin.fetch
 RUN "$W" "${ARGS[@]}";                       rc_is "a reference remote stripped of url and refspecs" 0
-is  "  restores the url" "$T/origin.git" "$(git -C "$W/ref.git" config --get remote.origin.url)"
+is_path "  restores the url" "$T/origin.git" "$(git -C "$W/ref.git" config --get remote.origin.url)"
 git -C "$W/ref.git" config --get-all remote.origin.fetch | grep -q 'refs/heads' \
     && ok "  restores the heads refspec" || bad "  restores the heads refspec"
 
@@ -164,13 +178,16 @@ printf '#!/bin/sh\necho "RM $*" >&2\n' > "$T/fakerm/rm"; chmod +x "$T/fakerm/rm"
 OUT=$(cd "$W" && PATH="$T/fakerm:$PATH" "$SH" "$SCRIPT" --repo "$T/origin.git" \
     --ref-dir ref.git --target-dir /tmp/.. --target-ref main 2>&1); RC=$?
 hasnt "a target dir resolving to the root is refused" "RM -rf /tmp/../.git"
-has  "  and says so" "unsafe repository directory"
+case "$(cd /tmp/.. 2>/dev/null && pwd)" in
+    / ) has "  and says so" "unsafe repository directory" ;;
+    * ) skip "  and says so ('..' reaches no root here)" ;;
+esac
 
 # --- a wrong repository is a caller mistake, never repaired ------------
 git -c init.defaultBranch=main init -q --bare "$T/other.git"
 RUN "$W" --repo "$T/other.git" --ref-dir ref.git
 [ "$RC" != 0 ] && ok "a reference dir belonging to another repo is refused" || bad "a reference dir belonging to another repo is refused (rc=$RC)"
-is  "  and keeps its origin" "$T/origin.git" "$(git -C "$W/ref.git" config --get remote.origin.url)"
+is_path "  and keeps its origin" "$T/origin.git" "$(git -C "$W/ref.git" config --get remote.origin.url)"
 
 # --- paths with spaces, twice ------------------------------------------
 SP="$T/ws two"; mkdir -p "$SP"
@@ -210,7 +227,7 @@ RUN "$W" --repo "$T/origin.git" --ref-dir refX.git;   rc_is "prep: a second refe
 rm "$W/refX.git/HEAD"
 RUN "$W" --repo "$T/foreign.git" --ref-dir refX.git
 [ "$RC" != 0 ] && ok "a damaged reference dir is not rebound to another repo" || bad "a damaged reference dir is not rebound to another repo (rc=$RC)"
-is  "  and keeps its origin" "$T/origin.git" "$(git config --file "$W/refX.git/config" --get remote.origin.url)"
+is_path "  and keeps its origin" "$T/origin.git" "$(git config --file "$W/refX.git/config" --get remote.origin.url)"
 
 rm -rf "$W/wt"; git -c init.defaultBranch=main init -q "$W/wt"
 RUN "$W" --repo "$T/origin.git" --ref-dir wt
@@ -297,12 +314,16 @@ RUN "$W" "${ARGS[@]}";                       rc_is "a malformed refspec added by
 is  "  and the config is back to ours" 4 "$(git -C "$W/src" config --get-all remote.origin.fetch | wc -l | tr -d ' ')"
 
 # --- an alternates file written by an older version --------------------
-rm -rf "$T/sym"; mkdir -p "$T/sym/real"; ln -s real "$T/sym/link"
-( cd "$T/sym/link" && "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir r.git --target-dir s --target-ref main ) >/dev/null 2>&1
-printf '%s\n' "$T/sym/link/r.git/objects" > "$T/sym/real/s/.git/objects/info/alternates"
-OUT=$(cd "$T/sym/link" && "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir r.git --target-dir s --target-ref main 2>&1); RC=$?
-rc_is "an alternates path that differs only by a symlink" 0
-hasnt "  is not treated as belonging elsewhere" "borrows objects from"
+if [ "$HAVE_SYMLINK" ]; then
+	rm -rf "$T/sym"; mkdir -p "$T/sym/real"; ln -s real "$T/sym/link"
+	( cd "$T/sym/link" && "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir r.git --target-dir s --target-ref main ) >/dev/null 2>&1
+	printf '%s\n' "$T/sym/link/r.git/objects" > "$T/sym/real/s/.git/objects/info/alternates"
+	OUT=$(cd "$T/sym/link" && "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir r.git --target-dir s --target-ref main 2>&1); RC=$?
+	rc_is "an alternates path that differs only by a symlink" 0
+	hasnt "  is not treated as belonging elsewhere" "borrows objects from"
+else
+	skip "an alternates path that differs only by a symlink (no symlinks here)"
+fi
 
 # --- an all-hex branch name deleted upstream ---------------------------
 cd "$T/seed"; git checkout -q main; echo hexy > a; git commit -qam hexy
@@ -352,7 +373,7 @@ RUN "$W" --repo "$T/origin.git" --ref-dir refBad;  rc_is "prep: a reference dir"
 printf '[' > "$W/refBad/config"
 RUN "$W" --repo "$T/origin.git" --ref-dir refBad
 rc_is "an unreadable reference config is repaired" 0
-is  "  and the origin is ours" "$T/origin.git" "$(git -C "$W/refBad" config --get remote.origin.url)"
+is_path "  and the origin is ours" "$T/origin.git" "$(git -C "$W/refBad" config --get remote.origin.url)"
 
 printf '[remote "origin"]\n\turl = %s\n[' "$T/second.git" > "$W/refBad/config"
 RUN "$W" --repo "$T/origin.git" --ref-dir refBad
@@ -435,15 +456,19 @@ is  "  the other checkout keeps its HEAD" "$G_HEAD" "$(git -C "$W/srcG" rev-pars
 is  "  and its work tree" "" "$(git -C "$W/srcG" status --porcelain)"
 
 # --- a .git symlinked into another checkout -----------------------------
-rm -rf "$W/srcG3"
-mkdir -p "$W/srcG3"; ln -s "$W/srcG/.git" "$W/srcG3/.git"; echo OLD > "$W/srcG3/a"
-G_HEAD=$(git -C "$W/srcG" rev-parse HEAD)
-RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcG3 --target-ref main
-rc_is "a target whose .git is a symlink" 0
-[ -L "$W/srcG3/.git" ] && bad "  gets a git dir of its own" || ok "  gets a git dir of its own"
-is  "  and the ref's content" nine "$(cat "$W/srcG3/a")"
-is  "  the other checkout keeps its HEAD" "$G_HEAD" "$(git -C "$W/srcG" rev-parse HEAD)"
-is  "  and its work tree" "" "$(git -C "$W/srcG" status --porcelain)"
+if [ "$HAVE_SYMLINK" ]; then
+	rm -rf "$W/srcG3"
+	mkdir -p "$W/srcG3"; ln -s "$W/srcG/.git" "$W/srcG3/.git"; echo OLD > "$W/srcG3/a"
+	G_HEAD=$(git -C "$W/srcG" rev-parse HEAD)
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcG3 --target-ref main
+	rc_is "a target whose .git is a symlink" 0
+	[ -L "$W/srcG3/.git" ] && bad "  gets a git dir of its own" || ok "  gets a git dir of its own"
+	is  "  and the ref's content" nine "$(cat "$W/srcG3/a")"
+	is  "  the other checkout keeps its HEAD" "$G_HEAD" "$(git -C "$W/srcG" rev-parse HEAD)"
+	is  "  and its work tree" "" "$(git -C "$W/srcG" status --porcelain)"
+else
+	skip "a target whose .git is a symlink (no symlinks here)"
+fi
 
 # --- a .git file naming a checkout of another repository ----------------
 rm -rf "$W/srcO" "$W/srcO2" "$W/refO"
@@ -496,11 +521,15 @@ RUN "$W" "${ARGS[@]}";                       rc_is "a hooksPath the repo points 
 is  "  does not get to rewrite the tree either" ten "$(cat "$W/src/a")"
 git -C "$W/src" config --unset core.hooksPath
 
-rm -rf "$W/srcD"; mkdir -p "$W/srcD"; ln -s "$W/no-such-dir/.git" "$W/srcD/.git"
-RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcD --target-ref main
-rc_is "a dangling .git symlink" 0
-[ -L "$W/srcD/.git" ] && bad "  is replaced by a real git dir" || ok "  is replaced by a real git dir"
-is  "  and the ref is checked out" ten "$(cat "$W/srcD/a")"
+if [ "$HAVE_SYMLINK" ]; then
+	rm -rf "$W/srcD"; mkdir -p "$W/srcD"; ln -s "$W/no-such-dir/.git" "$W/srcD/.git"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcD --target-ref main
+	rc_is "a dangling .git symlink" 0
+	[ -L "$W/srcD/.git" ] && bad "  is replaced by a real git dir" || ok "  is replaced by a real git dir"
+	is  "  and the ref is checked out" ten "$(cat "$W/srcD/a")"
+else
+	skip "a dangling .git symlink (no symlinks here)"
+fi
 
 # --- a main work tree that linked work trees hang off --------------------
 rm -rf "$W/srcW" "$W/linked"
@@ -512,7 +541,7 @@ RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW --target-ref
 [ "$RC" != 0 ] && ok "a main work tree with linked ones is not rebuilt" || bad "a main work tree with linked ones is not rebuilt (rc=$RC)"
 has "  and says why" "linked work trees"
 [ -d "$W/srcW/.git/worktrees/linked" ] && ok "  the linked work tree still has its metadata" || bad "  the linked work tree still has its metadata"
-is  "  and still resolves" "$W/srcW/.git/worktrees/linked" "$(git -C "$W/linked" rev-parse --absolute-git-dir 2>&1)"
+is_path "  and still resolves" "$W/srcW/.git/worktrees/linked" "$(git -C "$W/linked" rev-parse --absolute-git-dir 2>&1)"
 
 # --- a registration left behind by a work tree that is gone --------------
 rm -rf "$W/srcW2" "$W/linked2"
@@ -537,14 +566,18 @@ RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW3 --target-re
 rc_is "  and what it registered does not block the next recovery" 0
 
 # --- a .git symlink into a checkout that has work trees of its own -------
-rm -rf "$W/srcW4"; mkdir -p "$W/srcW4"
-ln -s "$W/srcW/.git" "$W/srcW4/.git"
-W_HEAD=$(git -C "$W/srcW" rev-parse HEAD)
-RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW4 --target-ref main
-rc_is "a .git symlink into a checkout with work trees is repaired" 0
-[ -L "$W/srcW4/.git" ] && bad "  the target gets one of its own" || ok "  the target gets one of its own"
-is  "  the donor keeps its HEAD" "$W_HEAD" "$(git -C "$W/srcW" rev-parse HEAD)"
-[ -d "$W/srcW/.git/worktrees/linked" ] && ok "  and its registrations" || bad "  and its registrations"
+if [ "$HAVE_SYMLINK" ]; then
+	rm -rf "$W/srcW4"; mkdir -p "$W/srcW4"
+	ln -s "$W/srcW/.git" "$W/srcW4/.git"
+	W_HEAD=$(git -C "$W/srcW" rev-parse HEAD)
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW4 --target-ref main
+	rc_is "a .git symlink into a checkout with work trees is repaired" 0
+	[ -L "$W/srcW4/.git" ] && bad "  the target gets one of its own" || ok "  the target gets one of its own"
+	is  "  the donor keeps its HEAD" "$W_HEAD" "$(git -C "$W/srcW" rev-parse HEAD)"
+	[ -d "$W/srcW/.git/worktrees/linked" ] && ok "  and its registrations" || bad "  and its registrations"
+else
+	skip "a .git symlink into a checkout with work trees (no symlinks here)"
+fi
 
 # --- recovery needs a ref to put the working tree back -------------------
 rm -rf "$W/srcN"
@@ -594,6 +627,10 @@ hasnt "the token stays out of the debug trace" "SUPERSECRETTOKENVALUE"
 hasnt "  and so does its base64" "$(printf 'x-access-token:ghs_SUPERSECRETTOKENVALUE' | base64 | tr -d '\n' | cut -c1-24)"
 
 echo
-echo "$PASS passed, $FAIL failed"
+if [ "$SKIP" -gt 0 ]; then
+    echo "$PASS passed, $FAIL failed, $SKIP skipped"
+else
+    echo "$PASS passed, $FAIL failed"
+fi
 rm -rf "$T"
 exit $FAIL
