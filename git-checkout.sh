@@ -21,7 +21,8 @@
 # reads the keys up to, and index 0 goes too because the fetch writes it.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
 	GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG \
-	GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+	GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 \
+	GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
 
 # A replacement ref is the same redirection one level down: it swaps the tree
 # behind a commit while its id - the one every check here compares - stays the
@@ -46,6 +47,22 @@ abs_path() {
 		( cd "$1" 2>/dev/null && pwd -P )
 	fi
 }
+
+# Hooks are code a repo carries, and they run inside the commands this script
+# gives it: post-checkout inside the checkout, and reference-transaction
+# inside anything that writes a ref - every fetch and every ref update here.
+# Picking commands to protect one at a time leaves the rest, so the two keys
+# go into the environment, where every git command below reads them and where
+# they beat the repo's own config. hooksPath names this script: a hook is
+# looked for inside it, and a file holds none. A path that merely does not
+# exist would do only until something creates it.
+HOOKS_OFF=$(abs_path "$(dirname "$0")")/$(basename "$0")
+GIT_CONFIG_COUNT=2
+GIT_CONFIG_KEY_0=core.fsmonitor
+GIT_CONFIG_VALUE_0=false
+GIT_CONFIG_KEY_1=core.hooksPath
+GIT_CONFIG_VALUE_1=$HOOKS_OFF
+export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
 
 # The object store a repo keeps its objects in, as an absolute path.
 objects_dir() {
@@ -213,6 +230,13 @@ set_refspecs() {
 	git -C "$1" config --add remote.origin.fetch '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' || return $RC_DAMAGE
 }
 
+# Puts the environment back to the two keys the whole run uses.
+drop_token() {
+	GIT_CONFIG_COUNT=2
+	export GIT_CONFIG_COUNT
+	unset GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
+}
+
 # Tags come through a refspec of their own rather than --tags: git only prunes
 # tags it fetched by refspec, and --prune-tags is ignored outright once
 # refspecs are given on the command line - a tag deleted upstream would live on
@@ -243,12 +267,11 @@ fetch_repo() {
 	fi
 	XTRACE=
 	case $- in *x*) XTRACE=1; set +x ;; esac
-	GIT_CONFIG_COUNT=0
 	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
-		GIT_CONFIG_COUNT=1
-		GIT_CONFIG_KEY_0=http.extraHeader
-		GIT_CONFIG_VALUE_0="Authorization: basic $(printf '%s' "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')"
-		export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+		GIT_CONFIG_COUNT=3
+		GIT_CONFIG_KEY_2=http.extraHeader
+		GIT_CONFIG_VALUE_2="Authorization: basic $(printf '%s' "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')"
+		export GIT_CONFIG_COUNT GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
 	fi
 	# Anything an older version of this script persisted.
 	git -C "$DIR" config --unset-all http.extraHeader 2>/dev/null || true
@@ -261,10 +284,10 @@ fetch_repo() {
 			'+refs/heads/*:refs/remotes/origin/*' \
 			'+refs/tags/*:refs/tags/*' \
 			'+refs/pull/*/head:refs/remotes/origin/pull/*/head' \
-			'+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' && { unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; return 0; }
+			'+refs/pull/*/merge:refs/remotes/origin/pull/*/merge' && { drop_token; return 0; }
 		retries=$((retries - 1))
 		if [ "$retries" -le 0 ]; then
-			unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+			drop_token
 			return $RC_DAMAGE
 		fi
 		echo "Git command failed. Retrying in ${delay}s..."
@@ -385,6 +408,21 @@ recover_target_repo() {
 			echo "Error: refusing to recover unsafe target dir: '$1'" >&2
 			return $RC_INVALID ;;
 	esac
+	# Linked work trees keep their administrative files under this .git and
+	# nowhere else: deleting it leaves each of them with 'not a git
+	# repository'. They are not this run's to rebuild, so it stops instead.
+	for WT in "$TARGET_ABS"/.git/worktrees/*; do
+		[ -e "$WT" ] || continue
+		echo "Error: $1 has linked work trees registered; recreating its .git would break them" >&2
+		return $RC_INVALID
+	done
+	# Without a ref nothing reconciles the working tree afterwards: the files
+	# would be left untracked beside a new .git, and a clean would then throw
+	# them away - both on a run that reports success.
+	if [ -z "$TARGET_REF" ]; then
+		echo "Error: $1 needs recovery, which requires --target-ref to put its working tree back" >&2
+		return $RC_INVALID
+	fi
 	RECOVERED="recovered"
 	echo "Warning: recovering $1 - reinitializing its .git (working tree files are kept and reconciled by the checkout)"
 	rm -rf -- "$TARGET_ABS/.git" || return $RC_DAMAGE
@@ -395,29 +433,6 @@ recover_target_repo() {
 
 # Wipes everything that is not tracked content, build output included. The
 # final status is the verdict; the steps before it are best effort.
-# The commands that touch the working tree get the local config that could
-# make them lie taken away: core.hooksPath (or .git/hooks) runs code of its
-# own between the checkout and the check that follows it, and core.fsmonitor
-# answers for what has changed since. Both survive in a reused checkout, and
-# neither is anything a build step should be deciding.
-gitw() {
-	GW_DIR=$1; shift
-	git -C "$GW_DIR" -c core.fsmonitor=false -c core.hooksPath="$GW_DIR/.git/hooks-disabled" "$@"
-}
-
-# hooksPath works by naming a directory that is not there. It is inside a
-# .git a healthy target keeps between runs, so it is the one place a hook
-# would still run from - and unlike .git/hooks, which tools populate by
-# accident, this path is named in the script. It belongs to the action, like
-# origin and the replacement refs: removed every run, and a removal that
-# does not take is damage, since only a fresh .git settles it.
-clear_hook_path() {
-	rm -rf -- "$1/.git/hooks-disabled" 2>/dev/null
-	[ -e "$1/.git/hooks-disabled" ] || return 0
-	echo "Warning: $1/.git/hooks-disabled cannot be removed" >&2
-	return $RC_DAMAGE
-}
-
 clean() {
 	git -C "$1" merge --abort  >/dev/null 2>&1 || true
 	git -C "$1" rebase --abort >/dev/null 2>&1 || true
@@ -429,9 +444,9 @@ clean() {
 	if ! git -C "$1" rev-parse --verify HEAD >/dev/null 2>&1; then
 		git -C "$1" read-tree --empty || return $RC_DAMAGE
 	fi
-	gitw "$1" clean -dffx || return $RC_DAMAGE
+	git -C "$1" clean -dffx || return $RC_DAMAGE
 	if git -C "$1" rev-parse --verify HEAD >/dev/null 2>&1; then
-		gitw "$1" reset --hard HEAD || return $RC_DAMAGE
+		git -C "$1" reset --hard HEAD || return $RC_DAMAGE
 	fi
 
 	git -C "$1" submodule foreach 'cd "$toplevel" && rm -fr -- "$sm_path"' || return $RC_DAMAGE
@@ -446,7 +461,7 @@ EOF
 
 	# -uall: a local status.showUntrackedFiles=no would otherwise mute the
 	# verdict, though not the clean itself.
-	STATUS=$(gitw "$1" status --porcelain -uall --ignored) || return $RC_DAMAGE
+	STATUS=$(git -C "$1" status --porcelain -uall --ignored) || return $RC_DAMAGE
 	[ -z "$STATUS" ] && return 0
 	echo "Clean failed"
 	return $RC_DAMAGE
@@ -503,9 +518,9 @@ checkout() {
 	case "$RESOLVED" in
 		refs/remotes/origin/* )
 			BRANCH=${RESOLVED#refs/remotes/origin/}
-			gitw "$1" checkout --force -B "$BRANCH" "$RESOLVED" || return $RC_DAMAGE ;;
+			git -C "$1" checkout --force -B "$BRANCH" "$RESOLVED" || return $RC_DAMAGE ;;
 		* )
-			gitw "$1" checkout --force "$RESOLVED" || return $RC_DAMAGE ;;
+			git -C "$1" checkout --force "$RESOLVED" || return $RC_DAMAGE ;;
 	esac
 	# A checkout that returns zero has still gone wrong if HEAD is not what
 	# was asked for: a refspec lost along the way leaves the remote ref
@@ -568,7 +583,6 @@ target_steps() {
 	check_target_layout "$1" || return $?
 	check_worktree_root "$1" || return $?
 	clear_stale_locks "$1"
-	clear_hook_path "$1" || return $?
 	has_skip_worktree "$1" && { echo "Warning: $1 has files marked skip-worktree" >&2; return $RC_DAMAGE; }
 	set_refspecs "$1" || return $?
 	fetch_repo "$1" fetch --prune --force --recurse-submodules=no || return $?

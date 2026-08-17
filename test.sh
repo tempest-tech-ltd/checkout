@@ -478,18 +478,51 @@ RUN "$W" "${ARGS[@]}";                       rc_is "a post-checkout hook in a re
 is  "  does not get to rewrite the tree" nine "$(cat "$W/src/a")"
 rm -f "$W/src/.git/hooks/post-checkout"
 
-mkdir -p "$W/src/.git/hooks-disabled"
-printf '#!/bin/sh\necho HOOKED > "$(git rev-parse --show-toplevel)/a"\n' > "$W/src/.git/hooks-disabled/post-checkout"
-chmod +x "$W/src/.git/hooks-disabled/post-checkout"
-RUN "$W" "${ARGS[@]}";                       rc_is "a hook in the dir hooksPath names" 0
-is  "  does not get to rewrite the tree either" nine "$(cat "$W/src/a")"
-[ -e "$W/src/.git/hooks-disabled" ] && bad "  and the dir is gone" || ok "  and the dir is gone"
+# reference-transaction runs inside every ref update - the fetch, and the
+# removal of replacement refs after the checkout.
+printf '#!/bin/sh\n[ "$1" = committed ] || exit 0\necho HOOKED > "$(git rev-parse --show-toplevel)/a"\n' > "$W/src/.git/hooks/reference-transaction"
+chmod +x "$W/src/.git/hooks/reference-transaction"
+cd "$T/seed"; echo ten > a; git commit -qam c10; git push -q "$T/origin.git" main; cd /
+RUN "$W" "${ARGS[@]}";                       rc_is "a reference-transaction hook" 0
+is  "  does not get to rewrite the tree" ten "$(cat "$W/src/a")"
+rm -f "$W/src/.git/hooks/reference-transaction"
+
+# a hooksPath of the repo's own choosing must not win either
+mkdir -p "$W/ownhooks"
+printf '#!/bin/sh\necho HOOKED > "$(git rev-parse --show-toplevel)/a"\n' > "$W/ownhooks/post-checkout"
+chmod +x "$W/ownhooks/post-checkout"
+git -C "$W/src" config core.hooksPath "$W/ownhooks"
+RUN "$W" "${ARGS[@]}";                       rc_is "a hooksPath the repo points elsewhere" 0
+is  "  does not get to rewrite the tree either" ten "$(cat "$W/src/a")"
+git -C "$W/src" config --unset core.hooksPath
 
 rm -rf "$W/srcD"; mkdir -p "$W/srcD"; ln -s "$W/no-such-dir/.git" "$W/srcD/.git"
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcD --target-ref main
 rc_is "a dangling .git symlink" 0
 [ -L "$W/srcD/.git" ] && bad "  is replaced by a real git dir" || ok "  is replaced by a real git dir"
-is  "  and the ref is checked out" nine "$(cat "$W/srcD/a")"
+is  "  and the ref is checked out" ten "$(cat "$W/srcD/a")"
+
+# --- a main work tree that linked work trees hang off --------------------
+rm -rf "$W/srcW" "$W/linked"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW --target-ref main
+rc_is "prep: a target to attach a work tree to" 0
+git -C "$W/srcW" worktree add -q -b wt "$W/linked" >/dev/null 2>&1
+git -C "$W/srcW" config --unset remote.origin.url
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW --target-ref main
+[ "$RC" != 0 ] && ok "a main work tree with linked ones is not rebuilt" || bad "a main work tree with linked ones is not rebuilt (rc=$RC)"
+has "  and says why" "linked work trees"
+[ -d "$W/srcW/.git/worktrees/linked" ] && ok "  the linked work tree still has its metadata" || bad "  the linked work tree still has its metadata"
+is  "  and still resolves" "$W/srcW/.git/worktrees/linked" "$(git -C "$W/linked" rev-parse --absolute-git-dir 2>&1)"
+
+# --- recovery needs a ref to put the working tree back -------------------
+rm -rf "$W/srcN"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcN --target-ref main
+rc_is "prep: a target to damage" 0
+echo KEEPME > "$W/srcN/untracked-artifact"
+git -C "$W/srcN" config --unset remote.origin.url
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcN --clean
+[ "$RC" != 0 ] && ok "recovery without a target ref is refused" || bad "recovery without a target ref is refused (rc=$RC)"
+is  "  and the working tree is left alone" KEEPME "$(cat "$W/srcN/untracked-artifact" 2>/dev/null)"
 
 # --- an unreadable config whose section names are upper case ------------
 rm -rf "$W/refB3"
@@ -506,7 +539,7 @@ OUT=$(cd "$W" && GIT_NAMESPACE=ns GIT_ALTERNATE_OBJECT_DIRECTORIES="$W/decoy" \
     GIT_WORK_TREE="$W/decoy" GIT_CONFIG="$T/extra-config" \
     "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcE --target-ref main 2>&1); RC=$?
 rc_is "a run under an inherited git environment" 0
-is  "  checks out where it was told" nine "$(cat "$W/srcE/a" 2>/dev/null)"
+is  "  checks out where it was told" ten "$(cat "$W/srcE/a" 2>/dev/null)"
 [ -e "$W/decoy/a" ] && bad "  and nowhere else" || ok "  and nowhere else"
 
 # --- the token must not be left in any config --------------------------
