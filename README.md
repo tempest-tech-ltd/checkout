@@ -94,12 +94,18 @@ would hand a different tree to the build steps that run after this action, on
 a checkout that verified as correct. The reference dir keeps its own: nothing
 is checked out there, and refs are not shared through alternates.
 
-Hooks do not run, and `core.fsmonitor` is ignored: the commands that write the
-working tree are given neither. A `post-checkout` hook left in a reused
-checkout runs inside the checkout and before the verification that follows it,
-so it can change tracked files on a run that then reports success. The rest of
-the local config is left alone - filters and `.git/info/attributes` shape the
-content of the working tree by design, which is what git-lfs is.
+No hook of the repository's runs, and `core.fsmonitor` is ignored, for every
+git command a run makes. A `post-checkout` hook runs inside the checkout and
+before the verification that follows it; `reference-transaction` runs inside
+anything that writes a ref, which includes the fetch - either can change
+tracked files on a run that then reports success. The rest of the local config
+is left alone: filters and `.git/info/attributes` shape the content of the
+working tree by design, which is what git-lfs is.
+
+A target with linked work trees registered under its `.git` is used as it is
+but never rebuilt: their administrative files live there and nowhere else, so
+recreating it would leave each of them without a repository. Recovery also
+needs a ref to check out, since nothing else puts the working tree back.
 
 Tags are mirrored from the remote, so a tag deleted upstream is deleted here,
 and a tag created locally in the checkout does not survive the next run.
