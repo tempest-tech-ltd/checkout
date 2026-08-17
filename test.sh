@@ -514,6 +514,38 @@ has "  and says why" "linked work trees"
 [ -d "$W/srcW/.git/worktrees/linked" ] && ok "  the linked work tree still has its metadata" || bad "  the linked work tree still has its metadata"
 is  "  and still resolves" "$W/srcW/.git/worktrees/linked" "$(git -C "$W/linked" rev-parse --absolute-git-dir 2>&1)"
 
+# --- a registration left behind by a work tree that is gone --------------
+rm -rf "$W/srcW2" "$W/linked2"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW2 --target-ref main
+rc_is "prep: another target to attach a work tree to" 0
+git -C "$W/srcW2" worktree add -q -b wt2 "$W/linked2" >/dev/null 2>&1
+rm -rf "$W/linked2"
+git -C "$W/srcW2" config --unset remote.origin.url
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW2 --target-ref main
+rc_is "a registration whose work tree is gone does not block recovery" 0
+is  "  and the ref is checked out" ten "$(cat "$W/srcW2/a")"
+
+# --- a work tree inside the target, which --clean removes ----------------
+rm -rf "$W/srcW3"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW3 --target-ref main
+rc_is "prep: a target to put a work tree inside" 0
+git -C "$W/srcW3" worktree add -q -b wt3 "$W/srcW3/inside" >/dev/null 2>&1
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW3 --target-ref main --clean
+rc_is "a work tree inside the target is cleaned away" 0
+git -C "$W/srcW3" config --unset remote.origin.url
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW3 --target-ref main
+rc_is "  and what it registered does not block the next recovery" 0
+
+# --- a .git symlink into a checkout that has work trees of its own -------
+rm -rf "$W/srcW4"; mkdir -p "$W/srcW4"
+ln -s "$W/srcW/.git" "$W/srcW4/.git"
+W_HEAD=$(git -C "$W/srcW" rev-parse HEAD)
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcW4 --target-ref main
+rc_is "a .git symlink into a checkout with work trees is repaired" 0
+[ -L "$W/srcW4/.git" ] && bad "  the target gets one of its own" || ok "  the target gets one of its own"
+is  "  the donor keeps its HEAD" "$W_HEAD" "$(git -C "$W/srcW" rev-parse HEAD)"
+[ -d "$W/srcW/.git/worktrees/linked" ] && ok "  and its registrations" || bad "  and its registrations"
+
 # --- recovery needs a ref to put the working tree back -------------------
 rm -rf "$W/srcN"
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcN --target-ref main
@@ -534,8 +566,12 @@ RUN "$W" --repo "$T/origin.git" --ref-dir refB3
 # --- an inherited git environment ---------------------------------------
 rm -rf "$W/srcE" "$W/decoy"
 mkdir -p "$W/decoy"
+mkdir -p "$W/evilhooks"
+printf '#!/bin/sh\necho HOOKED > "$(git rev-parse --show-toplevel)/a"\n' > "$W/evilhooks/post-checkout"
+chmod +x "$W/evilhooks/post-checkout"
 OUT=$(cd "$W" && GIT_NAMESPACE=ns GIT_ALTERNATE_OBJECT_DIRECTORIES="$W/decoy" \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0='^refs/heads/main' \
+    GIT_CONFIG_PARAMETERS="'core.hooksPath'='$W/evilhooks'" \
     GIT_WORK_TREE="$W/decoy" GIT_CONFIG="$T/extra-config" \
     "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcE --target-ref main 2>&1); RC=$?
 rc_is "a run under an inherited git environment" 0

@@ -17,10 +17,12 @@
 # environment does not get to redirect them: not the repo, work tree, index or
 # object store; not a second store to read besides the one chosen here; not a
 # prefix on every ref lookup; not a config file for the writes below, nor
-# config injected wholesale into every command. GIT_CONFIG_COUNT is what git
-# reads the keys up to, and index 0 goes too because the fetch writes it.
+# config injected wholesale into every command - in either form, since the
+# packed one is read after the keyed one and would win over what this script
+# sets there. GIT_CONFIG_COUNT is what git reads the keys up to, and the
+# three indices below are the ones this run writes itself.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-	GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG \
+	GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_PARAMETERS \
 	GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 \
 	GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
 
@@ -35,7 +37,7 @@ RC_INVALID=2    # the caller asked for something impossible - not repairable
 
 usage() {
 	echo Usage: `basename $0` "[--repo REPO_URL] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
-	echo "Exit: 0 ok, $RC_DAMAGE repository damaged beyond repair, $RC_INVALID invalid invocation"
+	echo "Exit: 0 ok, $RC_DAMAGE unfinished - damage a repair did not fix, or a fetch that kept failing, $RC_INVALID invalid invocation"
 	exit $RC_INVALID
 }
 
@@ -74,6 +76,18 @@ objects_dir() {
 }
 
 # --- validation: never changes anything -----------------------------------
+
+# Whether two spellings name the same repository. They can differ without
+# disagreeing: git-bash converts a path handed to git into its Windows form,
+# so the url the caller wrote and the one git stored or expanded name one
+# directory in two ways. Only paths are compared that way - a url resolves to
+# nothing, and two different ones must never come out equal by both resolving
+# to nothing.
+same_repo() {
+	[ "$1" = "$2" ] && return 0
+	SR_A=$(abs_path "$1")
+	[ -n "$SR_A" ] && [ "$SR_A" = "$(abs_path "$2")" ]
+}
 
 # Turns a caller's path into the one path the rest of the run uses. A '..' in
 # a path that does not exist yet cannot be resolved, and means something else
@@ -128,9 +142,8 @@ is_bare_repo() {
 # gets its identity checked. Repair must never be a way to rebind a store
 # that other checkouts borrow objects from.
 check_stored_identity() {
-	[ -f "$1/config" ] || [ -f "$1/.git/config" ] || return $RC_DAMAGE
+	[ -f "$1/config" ] || return $RC_DAMAGE
 	CFG=$1/config
-	[ -f "$CFG" ] || CFG=$1/.git/config
 	# --get returns the last value while fetch uses the first, so more than
 	# one url means the check and the fetch could disagree.
 	COUNT=$(git config --includes --file "$CFG" --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
@@ -141,7 +154,7 @@ check_stored_identity() {
 		return $RC_INVALID
 	fi
 	[ -z "$URL" ] && URL=$CURRENT && return 0
-	[ "$CURRENT" = "$URL" ] && return 0
+	same_repo "$CURRENT" "$URL" && return 0
 	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
 	return $RC_INVALID
 }
@@ -157,7 +170,7 @@ check_identity() {
 		return $RC_INVALID
 	fi
 	[ -z "$URL" ] && URL=$CURRENT && return 0
-	[ "$CURRENT" = "$URL" ] && return 0
+	same_repo "$CURRENT" "$URL" && return 0
 	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
 	return $RC_INVALID
 }
@@ -261,7 +274,7 @@ fetch_repo() {
 	# could repair it. Asked in the same dir the fetch runs in, which is what
 	# decides the answer.
 	EFFECTIVE=$(git -C "$DIR" ls-remote --get-url "$URL") || return $RC_DAMAGE
-	if [ "$EFFECTIVE" != "$URL" ]; then
+	if ! same_repo "$EFFECTIVE" "$URL"; then
 		echo "Error: git config rewrites '$URL' to '$EFFECTIVE' - remove the url.*.insteadOf entry" >&2
 		return $RC_INVALID
 	fi
@@ -411,11 +424,21 @@ recover_target_repo() {
 	# Linked work trees keep their administrative files under this .git and
 	# nowhere else: deleting it leaves each of them with 'not a git
 	# repository'. They are not this run's to rebuild, so it stops instead.
-	for WT in "$TARGET_ABS"/.git/worktrees/*; do
-		[ -e "$WT" ] || continue
-		echo "Error: $1 has linked work trees registered; recreating its .git would break them" >&2
-		return $RC_INVALID
-	done
+	# Only through a .git of the target's own: a symlink would find the
+	# registrations of the checkout it points at, and unlinking harms none
+	# of them. An entry whose gitdir names nothing that exists describes a
+	# work tree that is already gone - git keeps the entry, and a --clean
+	# that removed a work tree living inside the target leaves one - so
+	# there is nothing there to protect.
+	if [ -d "$TARGET_ABS/.git" ] && [ ! -L "$TARGET_ABS/.git" ]; then
+		for WT in "$TARGET_ABS"/.git/worktrees/*/; do
+			[ -f "${WT}gitdir" ] || continue
+			LINKED=$(cat -- "${WT}gitdir" 2>/dev/null)
+			[ -n "$LINKED" ] && [ -e "$LINKED" ] || continue
+			echo "Error: $1 has linked work trees registered; recreating its .git would break them" >&2
+			return $RC_INVALID
+		done
+	fi
 	# Without a ref nothing reconciles the working tree afterwards: the files
 	# would be left untracked beside a new .git, and a clean would then throw
 	# them away - both on a run that reports success.
