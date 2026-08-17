@@ -13,11 +13,19 @@
 # it does not apply inside a function called from an AND-OR list, which is
 # where all of these are called from.
 
-# An inherited git context would silently redirect every command below. A
-# replacement ref left in a reused checkout is the same problem one level
-# down: it swaps the tree behind a commit while its id - the one every check
-# here compares - stays the requested one.
-unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+# Every git command below has to mean the same thing on any machine, so the
+# environment does not get to redirect them: not the repo, work tree, index or
+# object store; not a second store to read besides the one chosen here; not a
+# prefix on every ref lookup; not a config file for the writes below, nor
+# config injected wholesale into every command. GIT_CONFIG_COUNT is what git
+# reads the keys up to, and index 0 goes too because the fetch writes it.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+	GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG \
+	GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+
+# A replacement ref is the same redirection one level down: it swaps the tree
+# behind a commit while its id - the one every check here compares - stays the
+# requested one. The refs are left in place, they are just not applied.
 GIT_NO_REPLACE_OBJECTS=1
 export GIT_NO_REPLACE_OBJECTS
 

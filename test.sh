@@ -446,6 +446,17 @@ printf '[REMOTE "origin"]\n\tURL = %s\n[\n' "$T/second.git" > "$W/refB3/config"
 RUN "$W" --repo "$T/origin.git" --ref-dir refB3
 [ "$RC" != 0 ] && ok "an unreadable config is read case-insensitively" || bad "an unreadable config is read case-insensitively (rc=$RC)"
 
+# --- an inherited git environment ---------------------------------------
+rm -rf "$W/srcE" "$W/decoy"
+mkdir -p "$W/decoy"
+OUT=$(cd "$W" && GIT_NAMESPACE=ns GIT_ALTERNATE_OBJECT_DIRECTORIES="$W/decoy" \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0='^refs/heads/main' \
+    GIT_WORK_TREE="$W/decoy" GIT_CONFIG="$T/extra-config" \
+    "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcE --target-ref main 2>&1); RC=$?
+rc_is "a run under an inherited git environment" 0
+is  "  checks out where it was told" nine "$(cat "$W/srcE/a" 2>/dev/null)"
+[ -e "$W/decoy/a" ] && bad "  and nowhere else" || ok "  and nowhere else"
+
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"
 OUT=$(cd "$W" && GITHUB_TOKEN=ghs_TOKENVALUE "$SH" "$SCRIPT" --repo "$T/origin.git" \
