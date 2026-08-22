@@ -174,8 +174,8 @@ deletable_dir() {
 	printf '%s\n' "$DEL"
 }
 
-# The two dirs are checked apart: only a work tree can be checked out, and
-# alternates must name the reference repo's own object store.
+# Whether $2, relative to $1, is a usable git dir ('.git' for a target, '.'
+# for a bare store); a gitfile pointing at one also answers yes.
 is_repo() {
 	git -C "$1" rev-parse --resolve-git-dir "$2" >/dev/null 2>&1
 }
@@ -186,7 +186,8 @@ is_bare_repo() {
 
 # Reads the config file directly, so a repo too damaged for git to open still
 # gets its identity checked. Repair must never be a way to rebind a store
-# that other checkouts borrow objects from.
+# that other checkouts borrow objects from. The config-file twin of
+# check_identity below - keep the two in step.
 check_stored_identity() {
 	[ -f "$1/config" ] || return $RC_DAMAGE
 	CFG=$1/config
@@ -199,6 +200,8 @@ check_stored_identity() {
 		echo "Error: $1 has more than one distinct origin url" >&2
 		return $RC_INVALID
 	fi
+	# --repo omitted: adopt the stored url. grant_token never grants the
+	# token for an adopted url, only for one the caller named.
 	[ -z "$URL" ] && URL=$CURRENT && return 0
 	same_repo "$CURRENT" "$URL" && return 0
 	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
@@ -206,7 +209,8 @@ check_stored_identity() {
 }
 
 # RC_INVALID when the repo belongs to a different remote: rebinding it would
-# point every checkout sharing this store at another project.
+# point every checkout sharing this store at another project. The open-repo
+# twin of check_stored_identity above.
 check_identity() {
 	COUNT=$(git -C "$1" config --local --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
 	CURRENT=$(git -C "$1" config --local --get-all remote.origin.url 2>/dev/null | head -1)
@@ -255,12 +259,11 @@ check_alternates() {
 
 # --- configuration --------------------------------------------------------
 
-# Kept in the config for anyone reading the repo by hand; the fetch passes its
-# own refspecs and does not consult these. origin is the action's to define,
-# not a set to append to. An extra fetch refspec is enough to break a run in
-# a way nothing else notices: a negative one ('^refs/heads/main') keeps the
-# branch out of the fetch, so the remote ref stays behind and the checkout -
-# and the HEAD check, reading that same ref - both pass on an old commit.
+# origin is the action's to define, not a set to append to. An extra fetch
+# refspec left in place breaks a run in a way nothing else notices: a negative
+# one ('^refs/heads/main') keeps the branch out of the fetch, so the remote
+# ref stays behind and the checkout - and the HEAD check, reading that same
+# ref - both pass on an old commit.
 set_origin() {
 	git -C "$1" config --unset-all remote.origin.url 2>/dev/null || true
 	git -C "$1" config --unset-all remote.origin.fetch 2>/dev/null || true
@@ -268,9 +271,6 @@ set_origin() {
 	set_refspecs "$1"
 }
 
-# The stored refspecs are for whoever opens the repo by hand later; the fetch
-# below passes its own on the command line and never reads these. They are kept
-# equal to it so a manual fetch does the same thing.
 # Replacement refs are the action's to remove, the way origin's config is:
 # no refspec carries them, so --prune cannot see one, and a replacement left
 # in a reused checkout outlives the run. Not applying them - which is what
@@ -289,6 +289,9 @@ clear_replace_refs() {
 	return $RC_DAMAGE
 }
 
+# The stored refspecs are for whoever opens the repo by hand later; the fetch
+# below passes its own on the command line and never reads these. They are
+# kept equal to it so a manual fetch does the same thing.
 set_refspecs() {
 	git -C "$1" config --unset-all remote.origin.fetch 2>/dev/null || true
 	git -C "$1" config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' || return $RC_DAMAGE
@@ -568,19 +571,16 @@ ensure_ref_repo() {
 	replace_repo "$STORE_ABS" create_ref_repo
 }
 
-# gc never runs in the store - pruning would delete objects that checkouts
+# gc never runs in the store: pruning would delete objects that checkouts
 # borrowing through alternates still reference, and the store knows nothing
-# about their refs; that is why every fetch above pins gc.auto=0. Without
-# it, daily fetches grow the store without bound: loose objects from small
-# fetches, one new pack per larger one. Repacking is the part of gc that is
-# safe here: objects are only ever moved into a pack, never deleted -
-# --keep-unreachable keeps even what only a borrower still reaches. Gated,
-# because the reachability walk behind a repack costs minutes on a large
-# history: the cheap pass fires on accumulated loose objects, the full
-# consolidation - which rewrites every pack and takes a while on a large
-# store - only when packs pile up. Raise the limits to leave the job to
-# external maintenance instead. Best effort: a failed repack never fails
-# the run.
+# about their refs (hence gc.auto=0 on every fetch). So daily fetches grow
+# it without bound - loose objects from small fetches, one new pack per
+# larger one. Repacking is the safe half of gc: objects are only ever moved
+# into a pack, never deleted - --keep-unreachable keeps even what only a
+# borrower still reaches. Gated, because the reachability walk behind a
+# repack costs minutes on a large history, and the full consolidation also
+# rewrites every pack. Raise the limits to leave the job to external
+# maintenance. Best effort: a failed repack never fails the run.
 compact_store() {
 	GD=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 0
 	PACKS=$(find "$GD/objects/pack" -name '*.pack' -type f 2>/dev/null | wc -l | tr -d ' ')
@@ -814,9 +814,6 @@ checkout() {
 	return $RC_DAMAGE
 }
 
-# Everything done to a target that already exists, in order, so the
-# dispatcher can retry the lot after a repair instead of restating the rule
-# at every step.
 # core.worktree points git's idea of the work tree somewhere else, and every
 # command here would follow it: clean would wipe that other directory and the
 # checkout would write there, while the dir the caller named keeps its old
@@ -861,6 +858,9 @@ has_skip_worktree() {
 	git -C "$1" ls-files -t 2>/dev/null | grep -q '^S '
 }
 
+# Everything done to a target that already exists, in order, so the
+# dispatcher can retry the lot after a repair instead of restating the rule
+# at every step.
 target_steps() {
 	check_target_layout "$1" || return $?
 	check_worktree_root "$1" || return $?
@@ -982,9 +982,11 @@ if [ -z "$TARGET_EXISTED" ]; then
 elif ! is_repo "$TARGET_DIR" .git; then
 	echo "Warning: $TARGET_DIR is not a valid git repo"
 	# Even a .git too broken for git to open can carry the action's
-	# signature: its alternates file naming this run's store. Read directly
-	# - the layout checks need a repo that opens - but only through a real
-	# .git directory of the target's own, never a symlink or a gitfile into
+	# signature: alternates naming this run's store, which only this action
+	# writes - a data dir has no .git at all, and another repository's
+	# checkout borrows from elsewhere. Read from the file directly - the
+	# layout checks need a repo that opens - but only through a real .git
+	# directory of the target's own, never a symlink or a gitfile into
 	# someone else's checkout.
 	if [ -d "$TARGET_DIR/.git" ] && [ ! -L "$TARGET_DIR/.git" ] \
 		&& alternates_match "$TARGET_DIR/.git/objects/info/alternates"; then
@@ -1004,14 +1006,12 @@ else
 		# A matching origin on a sound layout is what later earns the
 		# delete rung; damage found after this point does not revoke it.
 		[ "$RC" -eq 0 ] && TARGET_TRUSTED="matched"
-		# A checkout whose torn config lost the url still bears this
-		# action's signature: alternates pointing into this run's reference
-		# store, written by no one else. A data dir has no .git at all, and
-		# another repository's checkout borrows from elsewhere - while one
-		# that names another repository outright is RC_INVALID here, so it
-		# is repaired below but never deleted. Without --ref-dir there is
-		# no store to compare against, and check_alternates would answer
-		# yes for free.
+		# The same alternates signature as on the unopenable-.git branch
+		# above: a torn config that lost its url does not unmake the
+		# checkout. One that names another repository outright is
+		# RC_INVALID here - repaired below, never deleted. Without
+		# --ref-dir there is no store to compare against, and
+		# check_alternates would answer yes for free.
 		if [ "$RC" -eq "$RC_DAMAGE" ] && [ "$REF_DIR" ] && check_alternates "$TARGET_DIR" 2>/dev/null; then
 			TARGET_TRUSTED="alternates"
 		fi
@@ -1025,6 +1025,9 @@ else
 		[ "$RC" -eq "$RC_INVALID" ] && RC=$RC_DAMAGE
 		[ "$RC" -eq 0 ] && { check_alternates "$TARGET_DIR" || RC=$?; }
 	fi
+	# Unreachable today - the checks above return 0 or RC_DAMAGE - and kept
+	# so that a future check returning RC_INVALID stops here instead of
+	# leaking into repair.
 	if [ "$RC" -eq "$RC_INVALID" ]; then
 		exit $RC
 	elif [ "$RC" -ne 0 ]; then
