@@ -100,7 +100,7 @@ rm -rf "$W/src2"; git -c init.defaultBranch=main init -q "$W/src2"
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src2 --target-ref main
 rc_is "a repo that was init'd but never fetched" 0
 
-# --- reference dir: repaired in place, never deleted --------------------
+# --- reference dir: repaired in place first ------------------------------
 RUN "$W" "${ARGS[@]}"
 OBJ_BEFORE=$(find "$W/ref.git/objects" -type f | wc -l)
 rm "$W/ref.git/HEAD"
@@ -145,7 +145,6 @@ exec git_real "$@"
 EOF
 chmod +x "$T/fakebin/git"
 ln -sf "$(command -v git)" "$T/fakebin/git_real"
-git -C "$W/src" config --unset remote.origin.url
 touch "$T/nofetch"
 OBJ_REF=$(find "$W/ref.git/objects" -type f | wc -l)
 OUT=$(cd "$W" && PATH="$T/fakebin:$PATH" FAIL_FETCH=$T/nofetch GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
@@ -160,11 +159,13 @@ cd "$T/seed"; echo four > a; git commit -qam c4; git push -q "$T/origin.git" mai
 touch "$W/src/.git/refs/remotes/origin/main.lock"
 RUN "$W" "${ARGS[@]}";                       rc_is "a stale ref lock in the target" 0
 is  "  does not stop the update" four "$(cat "$W/src/a")"
+hasnt "  and needs no rebuild for that" "$RECOVER"
 
 cd "$T/seed"; echo five > a; git commit -qam c5; git push -q "$T/origin.git" main; cd /
 touch "$W/ref.git/refs/remotes/origin/main.lock"
 RUN "$W" "${ARGS[@]}";                       rc_is "a stale ref lock in the reference dir" 0
 is  "  does not stop the update either" five "$(cat "$W/src/a")"
+hasnt "  nor announces a repair" "$REPAIR"
 
 # --- a deleted remote branch must not fall back to the local one -------
 cd "$T/seed"; git checkout -qb gone; echo g > a; git commit -qam g
@@ -638,7 +639,7 @@ if [ "$HAVE_PERM" ]; then
 	[ -e "$W/srcZ/debris" ] && bad "  which removes the debris" || ok "  which removes the debris"
 	is  "  and checks out the ref" ten "$(cat "$W/srcZ/a")"
 	is  "  the rebuild ran once" 1 "$(echo "$OUT" | grep -c "Warning: recovering")"
-	is  "  and the reclone ran once" 1 "$(echo "$OUT" | grep -c "from scratch")"
+	is  "  and the reclone ran once" 1 "$(echo "$OUT" | grep -c "deleting the checkout")"
 	[ -e "$W/srcZ.gone" ] && bad "  leaving no trash behind" || ok "  leaving no trash behind"
 else
 	skip "an unwritable directory a clean cannot remove (deletion is not blocked here)"
@@ -682,6 +683,47 @@ else
 	skip "a target with no url but our alternates (deletion is not blocked here)"
 fi
 
+# --- a .git too broken to open still bears the signature -------------------
+if [ "$HAVE_PERM" ]; then
+	rm -rf "$W/srcI"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcI --target-ref main
+	rc_is "prep: a checkout to break the .git of" 0
+	rm "$W/srcI/.git/HEAD"
+	mkdir -p "$W/srcI/debris"; echo junk > "$W/srcI/debris/f"; chmod a-w "$W/srcI/debris"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcI --target-ref main --clean
+	rc_is "a broken .git with our alternates heals in one run" 0
+	[ -e "$W/srcI/debris" ] && bad "  removing the debris" || ok "  removing the debris"
+	is  "  and checks out the ref" ten "$(cat "$W/srcI/a")"
+else
+	skip "a broken .git with our alternates (deletion is not blocked here)"
+fi
+
+# --- the nuke rung is probe-gated too --------------------------------------
+if [ "$HAVE_PERM" ]; then
+	rm -rf "$T/fakeprobe"; mkdir -p "$T/fakeprobe"
+	cat > "$T/fakeprobe/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+	*" ls-remote --get-url "*) ;;
+	*" ls-remote "*) echo "fatal: simulated outage" >&2; exit 128 ;;
+esac
+exec git_real "$@"
+EOF
+	chmod +x "$T/fakeprobe/git"; ln -sf "$(command -v git)" "$T/fakeprobe/git_real"
+	rm -rf "$W/srcK"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcK --target-ref main
+	rc_is "prep: a target to obstruct offline" 0
+	mkdir -p "$W/srcK/debris"; echo junk > "$W/srcK/debris/f"; chmod a-w "$W/srcK/debris"
+	OUT=$(cd "$W" && PATH="$T/fakeprobe:$PATH" GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" \
+	    --repo "$T/origin.git" --ref-dir ref.git --target-dir srcK --target-ref main --clean 2>&1); RC=$?
+	[ "$RC" != 0 ] && ok "debris with the remote gone is not worth the tree" || bad "debris with the remote gone is not worth the tree (rc=$RC)"
+	has "  the probe said not answering" "not answering"
+	is  "  and the debris survives" junk "$(cat "$W/srcK/debris/f" 2>/dev/null)"
+	chmod -R u+rwX "$W/srcK" 2>/dev/null
+else
+	skip "the nuke rung is probe-gated (deletion is not blocked here)"
+fi
+
 # --- a contradicting url earns the repair, never the delete ---------------
 if [ "$HAVE_PERM" ]; then
 	rm -rf "$W/srcM"
@@ -701,8 +743,18 @@ fi
 # --- the last rung never fires for a mistake ------------------------------
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref no-such-ref
 [ "$RC" != 0 ] && ok "an unknown ref still fails" || bad "an unknown ref still fails (rc=$RC)"
-hasnt "  without reaching the full reclone" "cloning from scratch"
+hasnt "  without reaching the full reclone" "from scratch"
 [ -d "$W/src/.git" ] && ok "  and the checkout is still there" || bad "  and the checkout is still there"
+
+# --- recovery without a reference dir is refused before the delete --------
+rm -rf "$W/srcJ"
+git clone -q "$T/origin.git" "$W/srcJ"
+head -c 300 /dev/urandom > "$W/srcJ/.git/index"
+RUN "$W" --repo "$T/origin.git" --target-dir srcJ --target-ref main
+[ "$RC" != 0 ] && ok "recovery without a reference dir is refused" || bad "recovery without a reference dir is refused (rc=$RC)"
+has "  and says why" "without a reference dir"
+git -C "$W/srcJ" rev-parse --verify HEAD >/dev/null 2>&1 \
+    && ok "  keeping .git usable" || bad "  keeping .git usable"
 
 # --- an outage: nothing is deleted while the remote is down ---------------
 rm -rf "$W/srcY" "$W/refY.git"
@@ -743,6 +795,10 @@ rc_is "a target that cannot fetch fails with the fetch code" 3
 hasnt "  without spending the working tree" "from scratch"
 is  "  which is kept" KEEPME "$(cat "$W/srcX/untracked-artifact" 2>/dev/null)"
 [ -d "$W/srcX" ] && ok "  and the directory itself" || bad "  and the directory itself"
+# The probe failed too, so not even the .git rebuild was worth its refs.
+hasnt "  and .git is not rebuilt during the outage" "$RECOVER"
+git -C "$W/srcX" rev-parse --verify HEAD >/dev/null 2>&1 \
+    && ok "  its refs survive intact" || bad "  its refs survive intact"
 
 # --- a store too broken for the in-place repair ---------------------------
 rm -rf "$W/refZ.git"
@@ -771,6 +827,33 @@ mv "$T/origin-away.git" "$T/origin.git"
 RUN "$W" --repo "$T/origin.git" --ref-dir refP.git
 rc_is "  then heals by the reclone once it answers" 0
 has "  announcing it" "recloning it from scratch"
+
+# --- a store whose objects fail fsck is recloned ---------------------------
+rm -rf "$W/refF.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refF.git; rc_is "prep: a store to corrupt" 0
+git -C "$W/refF.git" repack -adq
+PACK=$(ls "$W/refF.git"/objects/pack/*.pack | head -1)
+chmod u+w "$PACK" && : > "$PACK"
+# The fetch fails while the truncated pack exists - FAIL_FETCH points at the
+# pack itself, so the reclone that removes it also lets the fetch work again.
+OUT=$(cd "$W" && PATH="$T/fakebin:$PATH" FAIL_FETCH=$PACK GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" \
+    --repo "$T/origin.git" --ref-dir refF.git 2>&1); RC=$?
+rc_is "a store whose objects fail fsck heals through the reclone" 0
+has "  implicated by fsck" "fails fsck"
+has "  and announced" "recloning it from scratch"
+git -C "$W/refF.git" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null \
+    && ok "  and serves refs again" || bad "  and serves refs again"
+
+# --- <dir>.gone may not hold anything this run works on -------------------
+rm -rf "$W/refC.git" "$W/refC.git.gone"
+RUN "$W" --repo "$T/origin.git" --ref-dir refC.git; rc_is "prep: a store named like trash prey" 0
+RUN "$W" --repo "$T/origin.git" --ref-dir refC.git --target-dir refC.git.gone/src --target-ref main
+rc_is "prep: a target inside the store's trash path" 0
+rm -rf "$W/refC.git/objects"; echo junk > "$W/refC.git/objects"
+RUN "$W" --repo "$T/origin.git" --ref-dir refC.git --target-dir refC.git.gone/src --target-ref main
+[ "$RC" != 0 ] && ok "a reclone whose trash path holds the target refuses" || bad "a reclone whose trash path holds the target refuses (rc=$RC)"
+has "  and says why" "is inside"
+is  "  the target survives" ten "$(cat "$W/refC.git.gone/src/a" 2>/dev/null)"
 
 # --- even then, a store of another repository is refused ------------------
 rm -rf "$W/refZ2.git"

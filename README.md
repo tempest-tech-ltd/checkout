@@ -54,7 +54,9 @@ this is a build step, not an interactive `git checkout`.
 | `clean: true` | reset to the ref | removed | removed |
 
 So `clean: false` is what lets a reused checkout keep its build output and
-caches; it is not a way to carry local edits across a run.
+caches; it is not a way to carry local edits across a run. The one exception
+is the reclone rung of recovery (below): a checkout so damaged that only
+delete-and-reclone helps loses its untracked content whatever `clean` says.
 
 # Recovery
 
@@ -75,27 +77,42 @@ nothing gentler could fix.
 
 The last rung is earned, never defaulted to. It runs once; only for a
 directory whose identity was positively established - it came into the run as
-a checkout of the requested repository (by its origin url, or, when a torn
-config lost the url, by alternates still pointing into this run's reference
-store), or the run created it - so a data directory a typo pointed the action
-at is never deleted; never for an invalid invocation (a mistyped ref, a wrong
-repository); and only after the remote answered a probe, since deleting a
-working tree cannot fix an outage. A fetch
-that merely kept failing - a dying pack transfer, a proxy, a full disk -
-deletes nothing and ends the run with an exit code of its own (3): at this
-size a failing transfer is routine, and no local deletion fixes it. The
-delete itself is a rename: the old content moves aside, the clone goes to the
-original path, and a clone that fails puts the old content back.
+a checkout of the requested repository (by its origin url, or by alternates
+pointing into this run's reference store, which is also how a `.git` too
+broken to open is recognized), or the run created it - so a data directory a
+typo pointed the action at is never deleted wholesale (its contents are still
+subject to `clean` and the checkout, like any target's); never for an invalid
+invocation (a mistyped ref, a wrong repository); only when the reclone has
+what it needs (`--target-ref` and a usable reference dir - checked before
+anything is deleted); and only after the remote answered a probe, since
+deleting a working tree cannot fix an outage.
+
+A fetch that merely kept failing - a dying pack transfer, a proxy, a full
+disk - never costs a working tree or a store's objects, and ends the run with
+an exit code of its own (3): at this size a failing transfer is routine, and
+no deletion fixes it. With the remote answering it may still buy the `.git`
+rebuild, since broken refs are one way a fetch fails - local branches and
+reflog do not survive a rebuild; during an outage not even that runs.
+
+The delete itself is a rename: the old content moves aside to `<dir>.gone`,
+the clone goes to the original path, and a clone that fails puts the old
+content back. Disk usage briefly peaks at old plus new. When the old content
+can be neither removed nor restored, it stays at `<dir>.gone` - named in a
+warning - and the next run through this rung clears that leftover: nothing
+else may live at that path.
 
 A reference dir is repaired in place, keeping its objects - other checkouts
 borrow them through alternates. Deleting the store and recloning is its own
 last rung, held to a stricter test: its structure refused even the
-reinitialization, or `git fsck` implicates its objects (a pack truncated by a
-killed fetch, say) - because there an in-place repair preserves exactly what
-is broken. The same rules hold: never for a store that belongs to another
-repository or that never showed an identity, and never while the remote does
-not answer. A checkout that borrowed objects the new store no longer holds is
-rebuilt by its own last rung the next time it runs.
+reinitialization, or `git fsck --connectivity-only` implicates its objects (a
+pack truncated by a killed fetch, say) - because there an in-place repair
+preserves exactly what is broken. That fsck finds missing and truncated
+objects, not silent bitrot inside intact-looking ones; a store broken that
+way keeps failing with exit 3 and needs a human. The same rules hold: never
+for a store that belongs to another repository or that never showed an
+identity, and never while the remote does not answer. A checkout that
+borrowed objects the new store no longer holds is healed by its own ladder
+when it next runs - usually the `.git` rebuild is enough.
 
 A ref that does not exist is treated as a caller mistake, not as damage - it
 fails without recreating anything. So does a reference dir belonging to another
