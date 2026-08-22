@@ -74,6 +74,16 @@ runs:
           SAFE_REPO_NAME="$REPO"
         fi
 
+        # Refused before any line below can echo the url into the log: it is
+        # the one input that may carry a secret by mistake. Only the
+        # authority is inspected - an '@' later in the path is a name.
+        AUTHORITY=${REPO_URL#https://}
+        AUTHORITY=${AUTHORITY%%/*}
+        if [[ "$AUTHORITY" == *@* ]]; then
+          echo "::error::credentials in the repository url are not supported - pass a token instead"
+          exit 2
+        fi
+
         REF_DIR=${REF_DIR:-$SAFE_REPO_NAME.git}
 
         cmd=(bash "$ACTION_PATH/git-checkout.sh" --debug --repo "$REPO_URL" --ref-dir "$REF_DIR")

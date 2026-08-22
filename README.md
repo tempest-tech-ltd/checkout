@@ -100,9 +100,10 @@ the clone goes to the original path, and a clone that fails puts the old
 content back. Disk usage briefly peaks at old plus new. When the old content
 can be neither removed nor restored, it stays at `<dir>.gone` - named in a
 warning - and the next run through this rung clears that leftover only after
-it proves to be one: a leftover is a copy of this very repository and
-identifies itself by its stored origin. Anything else found at that name is
-refused and has to be moved away by hand.
+it proves to be one on two counts: the marker the rename writes inside it,
+and the stored origin of the repository it is a copy of. A same-origin backup
+parked at that name carries no marker; a symlink is nobody's leftover at all -
+both are refused and have to be moved away by hand.
 
 Every rung that fires announces itself on one machine-greppable line -
 `SELF-HEAL: <store|target> rung=<reinit|rebuild|reclone> dir=<path>` - so a
@@ -189,9 +190,10 @@ than `GIT_STORE_PACK_LIMIT` (64) packs rewrites them into one, which takes a
 while on a large store - raise the limits if a separate maintenance job should
 own this instead. A failed repack never fails the run.
 
-A reference dir must not be updated by two runs at once. Lock files left behind
-by an interrupted git are removed, which assumes the run owns that directory
-for its duration.
+A reference dir must not be updated by two runs at once, and no borrower may
+be reading through its alternates while the reclone rung replaces it. Lock
+files left behind by an interrupted git are removed, which assumes the run
+owns that directory for its duration.
 
 # Scenarios
 

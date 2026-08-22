@@ -432,17 +432,23 @@ replace_repo() {
 			echo "Error: the target dir is inside $TRASH" >&2
 			return $RC_DAMAGE ;;
 	esac
-	# A symlink is unlinked, never followed: chmod -R through one would
-	# touch a tree this mechanism does not own.
-	[ -L "$TRASH" ] && rm -f -- "$TRASH"
+	# No repair leaves a symlink behind - mv moves a directory - so one at
+	# this name is somebody else's, and even reading through it is not ours
+	# to do.
+	if [ -L "$TRASH" ]; then
+		echo "Error: $TRASH is a symlink, which no repair leaves behind; move it away" >&2
+		return $RC_DAMAGE
+	fi
 	if [ -e "$TRASH" ]; then
-		# Cleared only after proving itself a leftover: a leftover is a
-		# copy of this very repo - a store, or a checkout with its .git -
-		# so it identifies itself by its stored origin the way a store
-		# does. Anything else at this name predates the action and is
-		# nobody's to delete; it is named so a human can move it away.
-		if check_stored_identity "$TRASH" 2>/dev/null \
-			|| check_stored_identity "$TRASH/.git" 2>/dev/null; then
+		# Cleared only after proving itself a leftover on two counts: the
+		# marker the rename writes into it, and the stored origin of the
+		# repo it is a copy of. Identity alone would also match a
+		# same-origin backup somebody parked at this name; a marker alone
+		# could sit in anything. Everything else is refused and named so a
+		# human can move it away.
+		if [ -f "$TRASH/.checkout-gone" ] \
+			&& { check_stored_identity "$TRASH" 2>/dev/null \
+				|| check_stored_identity "$TRASH/.git" 2>/dev/null; }; then
 			echo "Warning: clearing $TRASH left behind by an earlier repair"
 			chmod -R -- u+rwX "$TRASH" 2>/dev/null || true
 			rm -rf -- "$TRASH" 2>/dev/null
@@ -453,6 +459,10 @@ replace_repo() {
 	fi
 	[ -e "$TRASH" ] && { echo "Error: cannot clear $TRASH" >&2; return $RC_DAMAGE; }
 	mv -- "$1" "$TRASH" || { echo "Error: cannot move $1 aside" >&2; return $RC_DAMAGE; }
+	# The marker that lets the next run tell this leftover from a
+	# same-origin backup. Best effort: an unmarked leftover is refused,
+	# never mistaken for foreign data.
+	printf '%s\n' "$URL" > "$TRASH/.checkout-gone" 2>/dev/null || true
 	REPL_RC=0; "$2" "$1" || REPL_RC=$?
 	if [ "$REPL_RC" -eq 0 ]; then
 		chmod -R -- u+rwX "$TRASH" 2>/dev/null || true
@@ -461,11 +471,13 @@ replace_repo() {
 		return 0
 	fi
 	# The failed clone has to leave before the old content returns: mv onto
-	# an existing directory nests instead of replacing, silently.
+	# an existing directory nests instead of replacing, silently. The marker
+	# leaves first - restored content is live again, not a leftover.
 	rm -rf -- "$1" 2>/dev/null
 	if [ -e "$1" ]; then
 		echo "Error: cannot clear the failed clone at $1; the old content is at $TRASH" >&2
 	else
+		rm -f -- "$TRASH/.checkout-gone" 2>/dev/null
 		mv -- "$TRASH" "$1" || echo "Error: the old content is stranded at $TRASH" >&2
 	fi
 	return $REPL_RC
@@ -539,10 +551,17 @@ ensure_ref_repo() {
 			}' "$1/config")
 		# A url that disagrees means the store belongs to someone else and
 		# must not be rebound. Nothing readable at all is a different thing:
-		# there is no identity to protect, only a dir to repair.
-		if [ "$SALVAGED" ] && ! same_repo "$SALVAGED" "$URL"; then
-			echo "Error: $1 has an unreadable config; its origin reads '$SALVAGED', not '$URL'" >&2
-			return $RC_INVALID
+		# there is no identity to protect, only a dir to repair. A salvaged
+		# match is still an identification - only the file around the url
+		# is broken - so it earns what a readable match earns.
+		if [ "$SALVAGED" ]; then
+			if [ -z "$URL" ]; then
+				URL=$SALVAGED
+			elif ! same_repo "$SALVAGED" "$URL"; then
+				echo "Error: $1 has an unreadable config; its origin reads '$SALVAGED', not '$URL'" >&2
+				return $RC_INVALID
+			fi
+			REF_IDENTIFIED="salvaged"
 		fi
 		echo "Warning: $1 has an unreadable config, moving it aside" >&2
 		mv -- "$1/config" "$1/config.broken" || return $RC_DAMAGE
@@ -851,6 +870,19 @@ resolve_ref() {
 # worth having; wiping the rest is clean's job.
 checkout() {
 	RESOLVED=$(resolve_ref "$1" "$2") || return $?
+	# A ref can exist and still not name a commit - a tag on a blob or a
+	# tree. That is the caller's mistake, not damage: no repair makes it
+	# checkoutable, and the ladder would spend a working tree learning so.
+	# An object that cannot be read at all is damage - a refetch may heal.
+	WANT=$(git -C "$1" rev-parse --verify --quiet "$RESOLVED^{commit}")
+	if [ -z "$WANT" ]; then
+		if git -C "$1" cat-file -e "$RESOLVED" 2>/dev/null; then
+			echo "Error: target ref does not point to a commit: $2" >&2
+			return $RC_INVALID
+		fi
+		echo "Warning: $1 cannot read the object behind $RESOLVED" >&2
+		return $RC_DAMAGE
+	fi
 	case "$RESOLVED" in
 		refs/remotes/origin/* )
 			BRANCH=${RESOLVED#refs/remotes/origin/}
@@ -861,7 +893,6 @@ checkout() {
 	# A checkout that returns zero has still gone wrong if HEAD is not what
 	# was asked for: a refspec lost along the way leaves the remote ref
 	# behind, and the build would quietly be of an older commit.
-	WANT=$(git -C "$1" rev-parse "$RESOLVED^{commit}") || return $RC_DAMAGE
 	HAVE=$(git -C "$1" rev-parse HEAD) || return $RC_DAMAGE
 	[ "$WANT" = "$HAVE" ] && return 0
 	echo "Error: HEAD is $HAVE, expected $WANT for $2" >&2
@@ -907,11 +938,12 @@ check_worktree_root() {
 # A tracked file marked skip-worktree is left alone by clean, reset and a
 # forced checkout alike, so the run would report success over content that is
 # not the ref's. Sparse checkout works through the same bit, and
-# assume-unchanged fails the same way - ls-files -t shows it as the lowercase
-# tag. Recreating .git clears them all, and the objects come back from the
+# assume-unchanged fails the same way. -v, not -t: only -v lowercases the
+# tag of an assume-unchanged entry; -t keeps showing it as a plain H.
+# Recreating .git clears them all, and the objects come back from the
 # reference store.
 has_held_paths() {
-	git -C "$1" ls-files -t 2>/dev/null | grep -q '^[Shs] '
+	git -C "$1" ls-files -v 2>/dev/null | grep -q '^[[:lower:]S] '
 }
 
 # Everything done to a target that already exists, in order, so the
@@ -994,11 +1026,17 @@ done
 [ "$URL" ] && [ "$URL" = "${URL%.git}" ] && URL=$URL.git
 
 # Credentials belong in the token input: a url is logged by the debug trace,
-# stored in every repo config and printed in diagnostics.
+# stored in every repo config and printed in diagnostics. Only the authority
+# is inspected - an '@' later in the path is somebody's legitimate name.
 case "$URL" in
-	https://[!/]*@* )
-		echo "Error: credentials in the repository url are not supported - pass a token instead" >&2
-		exit $RC_INVALID ;;
+	https://* )
+		AUTHORITY=${URL#https://}
+		AUTHORITY=${AUTHORITY%%/*}
+		case "$AUTHORITY" in
+			*@* )
+				echo "Error: credentials in the repository url are not supported - pass a token instead" >&2
+				exit $RC_INVALID ;;
+		esac ;;
 esac
 
 if [ "$TARGET_REF" ] && [ -z "$TARGET_DIR" ]; then

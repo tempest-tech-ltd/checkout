@@ -39,3 +39,28 @@ jobs:
           GIT_FETCH_RETRIES: 2
           GIT_FETCH_DELAY: 1
         run: ./test.sh
+
+  # The suite exercises git-checkout.sh directly; this leg exercises the
+  # composite wrapper itself - input plumbing, default-ref derivation, the
+  # command construction.
+  smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the action against this repository
+        uses: ./
+        with:
+          token: ${{ github.token }}
+          common-path: smoke/store.git
+          path: smoke/src
+
+      - name: The checkout is real and at the right commit
+        shell: bash
+        run: |
+          test -f smoke/src/git-checkout.sh
+          [ "$(git -C smoke/src rev-parse HEAD)" = "$GITHUB_SHA" ]

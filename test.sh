@@ -377,9 +377,15 @@ RUN "$W" "${ARGS[@]}";                       rc_is "a sparse checkout" 0
 [ -f "$W/src/a" ] && ok "  restores every tracked file" || bad "  restores every tracked file"
 
 git -C "$W/src" update-index --assume-unchanged a
+git -C "$W/src" ls-files -v | grep -q '^h a' \
+    && ok "prep: assume-unchanged is set and only -v shows it" || bad "prep: assume-unchanged is set and only -v shows it"
 echo LOCAL > "$W/src/a"
 RUN "$W" "${ARGS[@]}";                       rc_is "a tracked file marked assume-unchanged" 0
-is  "  comes back at the ref's content" seven "$(cat "$W/src/a")"
+has "  is detected as held back" "held back"
+has "  and recovered" "$RECOVER"
+is  "  coming back at the ref's content" seven "$(cat "$W/src/a")"
+git -C "$W/src" ls-files -v | grep -q '^[[:lower:]S] ' \
+    && bad "  with no held paths left" || ok "  with no held paths left"
 
 # --- configuration reaching the repo through include.path --------------
 printf '[remote "origin"]\n\tfetch = ^refs/heads/main\n' > "$T/extra-config"
@@ -410,6 +416,20 @@ git -C "$T/seed" push -q "$T/origin.git" --delete refs/tags/doomed
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcT2 --target-ref main
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcT2 --target-ref refs/tags/doomed
 [ "$RC" != 0 ] && ok "a tag deleted upstream fails" || bad "a tag deleted upstream fails (rc=$RC)"
+
+# --- a tag that does not point at a commit -------------------------------
+cd "$T/seed"; git checkout -q main; git tag blobtag "$(git rev-parse HEAD:a)"
+git push -q "$T/origin.git" refs/tags/blobtag; cd /
+git -C "$W/src" branch -q keepme3 2>/dev/null
+echo SENTINEL > "$W/src/untracked-sentinel"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref refs/tags/blobtag
+rc_is "a tag pointing at a blob is a caller mistake" 2
+has "  and says so" "does not point to a commit"
+hasnt "  with no self-heal fired" "SELF-HEAL:"
+git -C "$W/src" show-ref --verify --quiet refs/heads/keepme3 \
+    && ok "  local branches survive" || bad "  local branches survive"
+is  "  and untracked content too" SENTINEL "$(cat "$W/src/untracked-sentinel" 2>/dev/null)"
+rm -f "$W/src/untracked-sentinel"; git -C "$W/src" branch -q -D keepme3 2>/dev/null
 
 # --- a work tree pointed somewhere else ---------------------------------
 mkdir -p "$T/elsewhere"; echo SENTINEL > "$T/elsewhere/artifact"
@@ -695,12 +715,40 @@ if [ "$HAVE_PERM" ]; then
 	is  "  the squatter survives" DATA "$(cat "$W/srcP.gone/keep.txt" 2>/dev/null)"
 	rm -rf "$W/srcP.gone"; cp -r "$W/srcP" "$W/srcP.gone"
 	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main --clean
-	rc_is "a leftover that proves itself ours is cleared" 0
+	[ "$RC" != 0 ] && ok "a same-origin backup at the name is not a leftover" || bad "a same-origin backup at the name is not a leftover (rc=$RC)"
+	has "  identity alone does not clear it" "not an earlier repair's leftover"
+	[ -d "$W/srcP.gone/.git" ] && ok "  the backup survives" || bad "  the backup survives"
+	echo x > "$W/srcP.gone/.checkout-gone"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main --clean
+	rc_is "a marked same-origin leftover is cleared" 0
 	has "  with the clearing announced" "left behind by an earlier repair"
 	[ -e "$W/srcP.gone" ] && bad "  and gone afterwards" || ok "  and gone afterwards"
 else
 	skip "a trash-path squatter is never cleared (deletion is not blocked here)"
 fi
+
+# --- a symlink at the trash path is nobody's leftover ---------------------
+if [ "$HAVE_PERM" ] && [ "$HAVE_SYMLINK" ]; then
+	rm -rf "$W/srcS3" "$W/srcS3.gone" "$W/decoy3"
+	mkdir -p "$W/decoy3"; echo D > "$W/decoy3/f"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcS3 --target-ref main
+	rc_is "prep: a target with a symlink at its trash path" 0
+	ln -s "$W/decoy3" "$W/srcS3.gone"
+	mkdir -p "$W/srcS3/debris"; echo junk > "$W/srcS3/debris/f"; chmod a-w "$W/srcS3/debris"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcS3 --target-ref main --clean
+	[ "$RC" != 0 ] && ok "a trash-path symlink refuses the reclone" || bad "a trash-path symlink refuses the reclone (rc=$RC)"
+	has "  and says why" "is a symlink"
+	[ -L "$W/srcS3.gone" ] && ok "  the symlink survives" || bad "  the symlink survives"
+	is  "  and what it points at too" D "$(cat "$W/decoy3/f" 2>/dev/null)"
+	chmod -R u+rwX "$W/srcS3" 2>/dev/null
+else
+	skip "a trash-path symlink is nobody's leftover (needs symlinks and blocked deletion)"
+fi
+
+# --- an '@' later in the url is a name, not a credential ------------------
+OUT=$(cd "$W" && GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" --repo "https://127.0.0.1:1/a@b" --ref-dir refV.git 2>&1); RC=$?
+rc_is "an @ in the url path is not userinfo" 3
+hasnt "  and is not refused as credentials" "pass a token"
 
 # --- a checkout that lost its url still bears the action's signature ------
 if [ "$HAVE_PERM" ]; then
