@@ -528,6 +528,7 @@ ensure_ref_repo() {
 	else
 		echo "Warning: $1 is not a valid bare git repo, reinitializing it in place (existing objects are kept)"
 	fi
+	echo "SELF-HEAL: store rung=reinit dir=$1"
 	RC=0; create_ref_repo "$1" || RC=$?
 	case "$RC" in
 		0 | "$RC_INVALID" ) return $RC ;;
@@ -563,6 +564,7 @@ ensure_ref_repo() {
 		return $RC
 	fi
 	echo "Warning: the repair was not enough, deleting the store $1 and recloning it from scratch"
+	echo "SELF-HEAL: store rung=reclone dir=$1"
 	replace_repo "$STORE_ABS" create_ref_repo
 }
 
@@ -628,6 +630,7 @@ recover_target_repo() {
 	fi
 	RECOVERED="recovered"
 	echo "Warning: recovering $1 - reinitializing its .git (working tree files are kept and reconciled by the checkout)"
+	echo "SELF-HEAL: target rung=rebuild dir=$1"
 	rm -rf -- "$TARGET_ABS/.git" || return $RC_DAMAGE
 	create_target_repo "$1"
 }
@@ -677,6 +680,7 @@ nuke_target_repo() {
 		return $RC_DAMAGE
 	fi
 	echo "Warning: repairs were not enough, deleting the checkout $1 and cloning it from scratch"
+	echo "SELF-HEAL: target rung=reclone dir=$1"
 	replace_repo "$TARGET_ABS" create_target_repo
 }
 

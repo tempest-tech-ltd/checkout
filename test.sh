@@ -78,6 +78,7 @@ mkdir -p "$W/src/out/devel"; echo CACHE > "$W/src/out/devel/artifact.o"
 git -C "$W/src" config --unset remote.origin.url
 RUN "$W" "${ARGS[@]}";                       rc_is "a repo whose remote url is gone" 0
 has "  is recovered" "$RECOVER"
+has "  logging the rung" "SELF-HEAL: target rung=rebuild"
 is  "  keeps the build cache" CACHE "$(cat "$W/src/out/devel/artifact.o")"
 
 rm "$W/src/.git/config"
@@ -106,6 +107,7 @@ OBJ_BEFORE=$(find "$W/ref.git/objects" -type f | wc -l)
 rm "$W/ref.git/HEAD"
 RUN "$W" "${ARGS[@]}";                       rc_is "a damaged reference dir" 0
 has "  is repaired in place" "$REPAIR"
+has "  logging the rung" "SELF-HEAL: store rung=reinit"
 OBJ_AFTER=$(find "$W/ref.git/objects" -type f | wc -l)
 [ "$OBJ_AFTER" -ge "$OBJ_BEFORE" ] && ok "  keeps its object store ($OBJ_BEFORE -> $OBJ_AFTER)" \
     || bad "  lost objects ($OBJ_BEFORE -> $OBJ_AFTER)"
@@ -121,6 +123,7 @@ git -C "$W/ref.git" config --get-all remote.origin.fetch | grep -q 'refs/heads' 
 RUN "$W" "${ARGS[@]}"
 hasnt "healthy dirs are not touched" "$RECOVER"
 hasnt "  nor reported as damaged" "$REPAIR"
+hasnt "  and no self-heal line is logged" "SELF-HEAL:"
 
 # --- caller mistakes are not damage ------------------------------------
 git -C "$W/src" checkout -q -b local-work 2>/dev/null
@@ -636,6 +639,7 @@ if [ "$HAVE_PERM" ]; then
 	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcZ --target-ref main --clean
 	rc_is "an unwritable directory a clean cannot remove" 0
 	has "  escalates to a full reclone" "deleting the checkout"
+	has "  logging the rung" "SELF-HEAL: target rung=reclone"
 	[ -e "$W/srcZ/debris" ] && bad "  which removes the debris" || ok "  which removes the debris"
 	is  "  and checks out the ref" ten "$(cat "$W/srcZ/a")"
 	is  "  the rebuild ran once" 1 "$(echo "$OUT" | grep -c "Warning: recovering")"
@@ -807,6 +811,7 @@ rm -rf "$W/refZ.git/objects"; echo junk > "$W/refZ.git/objects"
 RUN "$W" --repo "$T/origin.git" --ref-dir refZ.git
 rc_is "a store whose object dir is a file" 0
 has "  is recloned from scratch" "recloning it from scratch"
+has "  logging the rung" "SELF-HEAL: store rung=reclone"
 git -C "$W/refZ.git" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null \
     && ok "  and serves refs again" || bad "  and serves refs again"
 [ -e "$W/refZ.git.gone" ] && bad "  leaving no trash behind" || ok "  leaving no trash behind"
@@ -917,4 +922,5 @@ else
     echo "$PASS passed, $FAIL failed"
 fi
 rm -rf "$T"
-exit $FAIL
+# Not $FAIL itself: exit codes wrap at 256, so 256 failures would read as 0.
+exit $((FAIL > 0))

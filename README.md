@@ -101,6 +101,12 @@ can be neither removed nor restored, it stays at `<dir>.gone` - named in a
 warning - and the next run through this rung clears that leftover: nothing
 else may live at that path.
 
+Every rung that fires announces itself on one machine-greppable line -
+`SELF-HEAL: <store|target> rung=<reinit|rebuild|reclone> dir=<path>` - so a
+fleet's logs can be swept for every repair that ran; a healthy run prints
+none. A green job that self-heals every night is a problem these lines make
+visible.
+
 A reference dir is repaired in place, keeping its objects - other checkouts
 borrow them through alternates. Deleting the store and recloning is its own
 last rung, held to a stricter test: its structure refused even the
