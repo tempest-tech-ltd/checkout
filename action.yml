@@ -3,7 +3,8 @@ description: 'Checkout a Git repo using --reference'
 inputs:
   repository:
     description: |
-      GitHub repository name (e.g., owner/repo) or direct Git repository URL (e.g., https://git.example.com/repo.git)
+      GitHub repository name (e.g., owner/repo) or direct HTTPS Git repository URL (e.g., https://git.example.com/repo.git).
+      Other transports are not supported; credentials in the url are refused - pass a token instead.
       Default: GITHUB_REPOSITORY
   token:
     description: |

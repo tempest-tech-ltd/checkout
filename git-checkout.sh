@@ -38,7 +38,8 @@
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
 	GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_PARAMETERS \
 	GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 \
-	GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
+	GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 \
+	GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_ATTR_SOURCE
 
 # A replacement ref is the same redirection one level down: it swaps the tree
 # behind a commit while its id - the one every check here compares - stays the
@@ -80,6 +81,17 @@ GIT_CONFIG_VALUE_0=false
 GIT_CONFIG_KEY_1=core.hooksPath
 GIT_CONFIG_VALUE_1=$HOOKS_OFF
 export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
+
+# $1 if it is a whole number, $2 otherwise. The retry and maintenance knobs
+# come from the environment, and a stray value must not be able to crash
+# shell arithmetic - dash aborts the script on it - or silently disable a
+# gate.
+int_or() {
+	case "$1" in
+		'' | *[!0-9]* ) printf '%s\n' "$2" ;;
+		* ) printf '%s\n' "$1" ;;
+	esac
+}
 
 # The object store a repo keeps its objects in, as an absolute path.
 objects_dir() {
@@ -142,8 +154,11 @@ prepare_dir() {
 		return $RC_INVALID
 	fi
 	if [ ! -d "$1" ]; then
+		# Both separators: Win32 collapses '\..' the same way, and the
+		# action supports Windows paths.
 		case "$1" in
-			.. | ../* | */.. | */../* )
+			.. | ../* | */.. | */../* | \
+			..\\* | *\\.. | *\\..\\* | */..\\* | *\\../* )
 				echo "Error: '..' is not allowed in a path that does not exist yet: '$1'" >&2
 				return $RC_INVALID ;;
 		esac
@@ -357,8 +372,8 @@ fetch_repo() {
 	# Anything an older version of this script persisted.
 	git -C "$DIR" config --unset-all http.extraHeader 2>/dev/null || true
 
-	retries=${GIT_FETCH_RETRIES:-5}
-	delay=${GIT_FETCH_DELAY:-2}
+	retries=$(int_or "${GIT_FETCH_RETRIES:-}" 5)
+	delay=$(int_or "${GIT_FETCH_DELAY:-}" 2)
 	while :; do
 		git -C "$DIR" "$@" "$URL" \
 			'+refs/heads/*:refs/remotes/origin/*' \
@@ -421,9 +436,20 @@ replace_repo() {
 	# touch a tree this mechanism does not own.
 	[ -L "$TRASH" ] && rm -f -- "$TRASH"
 	if [ -e "$TRASH" ]; then
-		echo "Warning: clearing $TRASH left behind by an earlier repair"
-		chmod -R -- u+rwX "$TRASH" 2>/dev/null || true
-		rm -rf -- "$TRASH" 2>/dev/null
+		# Cleared only after proving itself a leftover: a leftover is a
+		# copy of this very repo - a store, or a checkout with its .git -
+		# so it identifies itself by its stored origin the way a store
+		# does. Anything else at this name predates the action and is
+		# nobody's to delete; it is named so a human can move it away.
+		if check_stored_identity "$TRASH" 2>/dev/null \
+			|| check_stored_identity "$TRASH/.git" 2>/dev/null; then
+			echo "Warning: clearing $TRASH left behind by an earlier repair"
+			chmod -R -- u+rwX "$TRASH" 2>/dev/null || true
+			rm -rf -- "$TRASH" 2>/dev/null
+		else
+			echo "Error: $TRASH exists and is not an earlier repair's leftover; move it away" >&2
+			return $RC_DAMAGE
+		fi
 	fi
 	[ -e "$TRASH" ] && { echo "Error: cannot clear $TRASH" >&2; return $RC_DAMAGE; }
 	mv -- "$1" "$TRASH" || { echo "Error: cannot move $1 aside" >&2; return $RC_DAMAGE; }
@@ -485,6 +511,17 @@ ensure_ref_repo() {
 	RC=0; check_stored_identity "$1" || RC=$?
 	[ "$RC" -eq "$RC_INVALID" ] && return $RC
 	[ "$RC" -eq 0 ] && REF_IDENTIFIED="matched"
+	# A dir that is not empty, shows no identity and has none of a bare
+	# repo's bones was never a store of anything - repair has no business
+	# sweeping its lock files, moving its 'config' aside or initializing
+	# git among its content. An empty dir is fine to adopt, and so is a
+	# recognizable store however damaged, identified or bare-shaped.
+	if [ -z "$REF_IDENTIFIED" ] \
+		&& [ "$(find "$1" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ] \
+		&& ! { [ -f "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]; }; then
+		echo "Error: $1 is not empty and not a recognizable repository store" >&2
+		return $RC_INVALID
+	fi
 	# A config git cannot parse kills every command including the init that
 	# would repair it. Salvage origin's url by hand to keep the no-rebind
 	# guarantee, then move the file aside so the repair can run at all.
@@ -503,7 +540,7 @@ ensure_ref_repo() {
 		# A url that disagrees means the store belongs to someone else and
 		# must not be rebound. Nothing readable at all is a different thing:
 		# there is no identity to protect, only a dir to repair.
-		if [ "$SALVAGED" ] && [ "$SALVAGED" != "$URL" ]; then
+		if [ "$SALVAGED" ] && ! same_repo "$SALVAGED" "$URL"; then
 			echo "Error: $1 has an unreadable config; its origin reads '$SALVAGED', not '$URL'" >&2
 			return $RC_INVALID
 		fi
@@ -588,12 +625,14 @@ compact_store() {
 	GD=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 0
 	PACKS=$(find "$GD/objects/pack" -name '*.pack' -type f 2>/dev/null | wc -l | tr -d ' ')
 	LOOSE=$(find "$GD"/objects/[0-9a-f][0-9a-f] -type f 2>/dev/null | wc -l | tr -d ' ')
-	if [ "$PACKS" -gt "${GIT_STORE_PACK_LIMIT:-64}" ]; then
+	PACK_LIMIT=$(int_or "${GIT_STORE_PACK_LIMIT:-}" 64)
+	LOOSE_LIMIT=$(int_or "${GIT_STORE_LOOSE_LIMIT:-}" 512)
+	if [ "$PACKS" -gt "$PACK_LIMIT" ]; then
 		echo "Note: consolidating $PACKS packs in $1"
-		git -C "$1" repack -a -d -k -q 2>/dev/null || true
-	elif [ "$LOOSE" -gt "${GIT_STORE_LOOSE_LIMIT:-512}" ]; then
+		git -C "$1" repack -a -d -k -q || true
+	elif [ "$LOOSE" -gt "$LOOSE_LIMIT" ]; then
 		echo "Note: packing $LOOSE loose objects in $1"
-		git -C "$1" repack -d -q 2>/dev/null || true
+		git -C "$1" repack -d -q || true
 		# The incremental pass packs only reachable loose objects, while the
 		# counter above counts every one. Unreachable loose accumulate as a
 		# matter of course - force-updated merge refs, deleted branches - and
@@ -602,9 +641,9 @@ compact_store() {
 		# -k form sweeps them into a pack; one stateless escalation converges
 		# in a single step.
 		LOOSE=$(find "$GD"/objects/[0-9a-f][0-9a-f] -type f 2>/dev/null | wc -l | tr -d ' ')
-		if [ "$LOOSE" -gt "${GIT_STORE_LOOSE_LIMIT:-512}" ]; then
+		if [ "$LOOSE" -gt "$LOOSE_LIMIT" ]; then
 			echo "Note: consolidating to sweep $LOOSE unreachable loose objects in $1"
-			git -C "$1" repack -a -d -k -q 2>/dev/null || true
+			git -C "$1" repack -a -d -k -q || true
 		fi
 	fi
 	return 0
@@ -867,10 +906,12 @@ check_worktree_root() {
 
 # A tracked file marked skip-worktree is left alone by clean, reset and a
 # forced checkout alike, so the run would report success over content that is
-# not the ref's. Sparse checkout works through the same bit. Recreating .git
-# clears both, and the objects come back from the reference store.
-has_skip_worktree() {
-	git -C "$1" ls-files -t 2>/dev/null | grep -q '^S '
+# not the ref's. Sparse checkout works through the same bit, and
+# assume-unchanged fails the same way - ls-files -t shows it as the lowercase
+# tag. Recreating .git clears them all, and the objects come back from the
+# reference store.
+has_held_paths() {
+	git -C "$1" ls-files -t 2>/dev/null | grep -q '^[Shs] '
 }
 
 # Everything done to a target that already exists, in order, so the
@@ -880,7 +921,7 @@ target_steps() {
 	check_target_layout "$1" || return $?
 	check_worktree_root "$1" || return $?
 	clear_stale_locks "$1"
-	has_skip_worktree "$1" && { echo "Warning: $1 has files marked skip-worktree" >&2; return $RC_DAMAGE; }
+	has_held_paths "$1" && { echo "Warning: $1 has paths held back by skip-worktree or assume-unchanged" >&2; return $RC_DAMAGE; }
 	set_refspecs "$1" || return $?
 	fetch_repo "$1" fetch --prune --force --recurse-submodules=no || return $?
 	if [ "$CLEAN" ]; then
@@ -891,7 +932,7 @@ target_steps() {
 		# A sparse checkout with nothing currently excluded leaves no trace
 		# before the fetch, and only marks paths the new commit adds. The
 		# invariant is that a finished target holds none of them at all.
-		has_skip_worktree "$1" && { echo "Warning: the checkout left files marked skip-worktree in $1" >&2; return $RC_DAMAGE; }
+		has_held_paths "$1" && { echo "Warning: the checkout left held-back paths in $1" >&2; return $RC_DAMAGE; }
 	fi
 	clear_replace_refs "$1" || return $?
 	return 0
@@ -951,6 +992,14 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$URL" ] && [ "$URL" = "${URL%.git}" ] && URL=$URL.git
+
+# Credentials belong in the token input: a url is logged by the debug trace,
+# stored in every repo config and printed in diagnostics.
+case "$URL" in
+	https://[!/]*@* )
+		echo "Error: credentials in the repository url are not supported - pass a token instead" >&2
+		exit $RC_INVALID ;;
+esac
 
 if [ "$TARGET_REF" ] && [ -z "$TARGET_DIR" ]; then
 	echo "Error: --target-ref requires --target-dir"

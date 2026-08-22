@@ -296,6 +296,10 @@ RUN "$W" --repo "$T/origin.git" --ref-dir "$T/base2/keep/new/.."
 [ "$RC" != 0 ] && ok "the same for the reference dir" || bad "the same for the reference dir (rc=$RC)"
 is  "  its neighbour is untouched too" PRECIOUS "$(cat "$T/base2/keep/artifact.bin" 2>/dev/null)"
 
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir "$T/bs/new\..\evil" --target-ref main
+[ "$RC" != 0 ] && ok "a new path with a backslash '..' is refused" || bad "a new path with a backslash '..' is refused (rc=$RC)"
+has "  the same as the slash form" "is not allowed"
+
 # --- reference and target may not contain each other -------------------
 RUN "$W" --repo "$T/origin.git" --ref-dir same --target-dir same --target-ref main
 [ "$RC" != 0 ] && ok "the same dir for both is refused" || bad "the same dir for both is refused (rc=$RC)"
@@ -371,6 +375,11 @@ git -C "$W/src" sparse-checkout init --cone >/dev/null 2>&1
 git -C "$W/src" sparse-checkout set sub >/dev/null 2>&1
 RUN "$W" "${ARGS[@]}";                       rc_is "a sparse checkout" 0
 [ -f "$W/src/a" ] && ok "  restores every tracked file" || bad "  restores every tracked file"
+
+git -C "$W/src" update-index --assume-unchanged a
+echo LOCAL > "$W/src/a"
+RUN "$W" "${ARGS[@]}";                       rc_is "a tracked file marked assume-unchanged" 0
+is  "  comes back at the ref's content" seven "$(cat "$W/src/a")"
 
 # --- configuration reaching the repo through include.path --------------
 printf '[remote "origin"]\n\tfetch = ^refs/heads/main\n' > "$T/extra-config"
@@ -665,11 +674,33 @@ fi
 # --- the same for a reference dir that was never a store ------------------
 rm -rf "$T/preciousR"; mkdir -p "$T/preciousR"
 echo PRECIOUS > "$T/preciousR/artifact.bin"; echo junk > "$T/preciousR/objects"
+echo LOCKED > "$T/preciousR/database.lock"
 RUN "$W" --repo "$T/origin.git" --ref-dir "$T/preciousR"
 [ "$RC" != 0 ] && ok "a data dir that cannot become a store fails" || bad "a data dir that cannot become a store fails (rc=$RC)"
-has "  refusing the reclone for a dir that was never a store" "never identified"
-is  "  and its content survives" PRECIOUS "$(cat "$T/preciousR/artifact.bin" 2>/dev/null)"
+has "  refused before anything is touched" "not a recognizable repository store"
+is  "  its content survives" PRECIOUS "$(cat "$T/preciousR/artifact.bin" 2>/dev/null)"
+is  "  and so do its lock files" LOCKED "$(cat "$T/preciousR/database.lock" 2>/dev/null)"
 rm -rf "$T/preciousR"
+
+# --- <dir>.gone that is not ours is never cleared --------------------------
+if [ "$HAVE_PERM" ]; then
+	rm -rf "$W/srcP" "$W/srcP.gone"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main
+	rc_is "prep: a target with a squatter at its trash path" 0
+	mkdir -p "$W/srcP.gone"; echo DATA > "$W/srcP.gone/keep.txt"
+	mkdir -p "$W/srcP/debris"; echo junk > "$W/srcP/debris/f"; chmod a-w "$W/srcP/debris"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main --clean
+	[ "$RC" != 0 ] && ok "the reclone refuses a trash path it does not own" || bad "the reclone refuses a trash path it does not own (rc=$RC)"
+	has "  and says why" "not an earlier repair's leftover"
+	is  "  the squatter survives" DATA "$(cat "$W/srcP.gone/keep.txt" 2>/dev/null)"
+	rm -rf "$W/srcP.gone"; cp -r "$W/srcP" "$W/srcP.gone"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main --clean
+	rc_is "a leftover that proves itself ours is cleared" 0
+	has "  with the clearing announced" "left behind by an earlier repair"
+	[ -e "$W/srcP.gone" ] && bad "  and gone afterwards" || ok "  and gone afterwards"
+else
+	skip "a trash-path squatter is never cleared (deletion is not blocked here)"
+fi
 
 # --- a checkout that lost its url still bears the action's signature ------
 if [ "$HAVE_PERM" ]; then
@@ -916,6 +947,18 @@ OUT=$(cd "$W" && GIT_NAMESPACE=ns GIT_ALTERNATE_OBJECT_DIRECTORIES="$W/decoy" \
 rc_is "a run under an inherited git environment" 0
 is  "  checks out where it was told" ten "$(cat "$W/srcE/a" 2>/dev/null)"
 [ -e "$W/decoy/a" ] && bad "  and nowhere else" || ok "  and nowhere else"
+
+# --- garbage in the tuning knobs falls back to defaults -----------------
+# Load-bearing under dash: unvalidated non-numeric arithmetic aborts it.
+OUT=$(cd "$W" && GIT_FETCH_RETRIES=banana GIT_FETCH_DELAY=- GIT_STORE_LOOSE_LIMIT=huge \
+    GIT_STORE_PACK_LIMIT= "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "garbage in the tuning knobs falls back to defaults" 0
+
+# --- credentials in the url are refused ---------------------------------
+RUN "$W" --repo "https://user:pass@127.0.0.1/x" --ref-dir refU.git
+[ "$RC" != 0 ] && ok "credentials in the url are refused" || bad "credentials in the url are refused (rc=$RC)"
+has "  pointing at the token input" "pass a token instead"
+[ -d "$W/refU.git" ] && bad "  before creating anything" || ok "  before creating anything"
 
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"

@@ -9,7 +9,8 @@ Note: requires git version >= 2.35
 ```yaml
 - uses: tempest-tech-ltd/checkout@v3
   with:
-    # GitHub repository name (with owner) or direct Git repository URL
+    # GitHub repository name (with owner) or direct HTTPS Git repository URL
+    # (other transports are not supported; credentials in the url are refused)
     # Examples: tempest-tech-ltd/checkout, https://git.example.com/repo.git
     # Default:
     repository: ${{ github.repository }}
@@ -98,8 +99,10 @@ The delete itself is a rename: the old content moves aside to `<dir>.gone`,
 the clone goes to the original path, and a clone that fails puts the old
 content back. Disk usage briefly peaks at old plus new. When the old content
 can be neither removed nor restored, it stays at `<dir>.gone` - named in a
-warning - and the next run through this rung clears that leftover: nothing
-else may live at that path.
+warning - and the next run through this rung clears that leftover only after
+it proves to be one: a leftover is a copy of this very repository and
+identifies itself by its stored origin. Anything else found at that name is
+refused and has to be moved away by hand.
 
 Every rung that fires announces itself on one machine-greppable line -
 `SELF-HEAL: <store|target> rung=<reinit|rebuild|reclone> dir=<path>` - so a
@@ -129,7 +132,10 @@ anyway.
 One narrow exception, for stores that predate this: if the config is damaged
 past reading and nothing can be recovered from it - no origin url, no include
 that might carry one - there is no identity left to protect, and the store is
-accepted for the repository that was asked for.
+accepted for the repository that was asked for. The exception requires the dir
+to still carry a bare repository's skeleton: a non-empty directory that shows
+neither an identity nor that shape was never a store of anything, and is
+refused before its lock files, its `config` or its content are touched.
 
 A git configuration that rewrites the repository url - `url.<base>.insteadOf`,
 in the machine's config or the checkout's own - is refused rather than followed.
@@ -168,8 +174,9 @@ names that overlap that namespace - `pull/<n>/head`, `pull/<n>/merge` - would
 map onto the same remote-tracking ref as the pull request of that number, and
 git refuses to fetch both. Such branch names are not supported.
 
-`origin` belongs to the action: its url and fetch refspecs are rewritten on
-every run, so extra or hand-edited values there do not survive.
+`origin` belongs to the action: its fetch refspecs are rewritten on every run
+and its url whenever the repo is created or repaired, so extra or hand-edited
+values there do not survive.
 
 The store is also kept from growing without bound. gc never runs in it -
 pruning would delete objects that checkouts still borrow - but repacking is
