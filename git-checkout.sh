@@ -116,6 +116,18 @@ same_repo() {
 	return 1
 }
 
+# A filesystem root - /, //, a drive, a UNC server or share root - or nothing
+# at all. The one list every path guard below shares: the two copies it
+# replaced had already drifted apart once.
+is_fs_root() {
+	case "$1" in
+		"" | / | // | ?:[/\\] | ?:[/\\][/\\] ) return 0 ;;
+		//*/*/* ) return 1 ;;
+		//* ) return 0 ;;
+	esac
+	return 1
+}
+
 # Turns a caller's path into the one path the rest of the run uses. A '..' in
 # a path that does not exist yet cannot be resolved, and means something else
 # once the dirs above it appear - 'base/keep/new/..' becomes 'base/keep', a
@@ -125,9 +137,10 @@ same_repo() {
 # on Windows the default workspace is too deep for a chromium checkout, so
 # ours live elsewhere. Prints the canonical path.
 prepare_dir() {
-	case "$1" in
-		"" | / | // ) echo "Error: unsafe repository directory: '$1'" >&2; return $RC_INVALID ;;
-	esac
+	if is_fs_root "$1"; then
+		echo "Error: unsafe repository directory: '$1'" >&2
+		return $RC_INVALID
+	fi
 	if [ ! -d "$1" ]; then
 		case "$1" in
 			.. | ../* | */.. | */../* )
@@ -137,15 +150,10 @@ prepare_dir() {
 	fi
 	mkdir -p -- "$1" 2>/dev/null || { echo "Error: cannot create directory: '$1'" >&2; return $RC_DAMAGE; }
 	DIR_ABS=$(abs_path "$1")
-	case "$DIR_ABS" in
-		"" | / | // | ?:[/\\] | ?:[/\\][/\\] )
-			echo "Error: unsafe repository directory: '$1' resolves to '$DIR_ABS'" >&2
-			return $RC_INVALID ;;
-		//*/*/* ) ;;
-		//* )
-			echo "Error: unsafe repository directory: '$1' resolves to '$DIR_ABS'" >&2
-			return $RC_INVALID ;;
-	esac
+	if is_fs_root "$DIR_ABS"; then
+		echo "Error: unsafe repository directory: '$1' resolves to '$DIR_ABS'" >&2
+		return $RC_INVALID
+	fi
 	printf '%s\n' "$DIR_ABS"
 }
 
@@ -161,16 +169,11 @@ check_disjoint() {
 
 # The path a repair is about to delete, resolved fresh at that moment rather
 # than trusted from earlier in the run: '/tmp/..' and a symlink to / both name
-# the root while looking harmless. Prints the resolved path; fails on anything
-# that resolves to a filesystem root - a drive, a UNC server or share root -
-# or to nothing at all.
+# the root while looking harmless. Prints the resolved path; fails on a
+# filesystem root or a path that resolves to nothing.
 deletable_dir() {
 	DEL=$(abs_path "$1")
-	case "$DEL" in
-		"" | / | // | ?:[/\\] | ?:[/\\][/\\] ) return 1 ;;
-		//*/*/* ) ;;
-		//* ) return 1 ;;
-	esac
+	is_fs_root "$DEL" && return 1
 	printf '%s\n' "$DEL"
 }
 
@@ -732,11 +735,11 @@ clean() {
 	fi
 
 	git -C "$1" submodule foreach 'cd "$toplevel" && rm -fr -- "$sm_path"' || return $RC_DAMAGE
-	cat <<EOF
+	cat <<-EOF
 	Note: The next command may produce error and warning messages due to
 	the nature of submodule deinitialization.
 	This is expected behavior and _usually_ does not indicate a problem.
-EOF
+	EOF
 	git -C "$1" submodule deinit --force --all || true
 	GD=$(git -C "$1" rev-parse --absolute-git-dir) || return $RC_DAMAGE
 	rm -fr -- "$GD/modules" || return $RC_DAMAGE
