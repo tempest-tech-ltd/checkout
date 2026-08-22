@@ -46,7 +46,8 @@ REPAIR="reinitializing it in place"
 # Where ln -s only copies - git-bash without winsymlinks:nativestrict - the
 # blocks that depend on real symlinks would pass without testing anything.
 if ln -s . "$T/symprobe" 2>/dev/null && [ -L "$T/symprobe" ]; then HAVE_SYMLINK=1; else HAVE_SYMLINK=; fi
-rm -f "$T/symprobe"
+# Without native symlinks MSYS ln copies, so the probe may be a directory.
+rm -rf "$T/symprobe"
 
 echo "# checkout under $SH ($("$SH" -c 'echo $0') / git $(git --version | awk '{print $3}')${HAVE_SYMLINK:+, symlinks})"
 

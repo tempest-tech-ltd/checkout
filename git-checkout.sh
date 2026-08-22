@@ -97,7 +97,19 @@ objects_dir() {
 same_repo() {
 	[ "$1" = "$2" ] && return 0
 	SR_A=$(abs_path "$1")
-	[ -n "$SR_A" ] && [ "$SR_A" = "$(abs_path "$2")" ]
+	[ -n "$SR_A" ] && [ "$SR_A" = "$(abs_path "$2")" ] && return 0
+	# Resolving needs the directory to exist, and on git-bash the two
+	# spellings of one path diverge even then: the url git stored is the
+	# windows form of the posix path the caller wrote. Once the remote goes
+	# missing the resolution above cannot reconcile them, and an outage
+	# would read as a different repository. cygpath translates by the mount
+	# table without touching the filesystem; distinct paths stay distinct,
+	# so nothing new comes out equal.
+	if [ "$MSYSTEM" ] && command -v cygpath >/dev/null 2>&1; then
+		SR_A=$(cygpath -m -- "$1" 2>/dev/null)
+		[ -n "$SR_A" ] && [ "$SR_A" = "$(cygpath -m -- "$2" 2>/dev/null)" ] && return 0
+	fi
+	return 1
 }
 
 # Turns a caller's path into the one path the rest of the run uses. A '..' in
