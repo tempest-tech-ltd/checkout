@@ -75,10 +75,12 @@ nothing gentler could fix.
 
 The last rung is earned, never defaulted to. It runs once; only for a
 directory whose identity was positively established - it came into the run as
-a checkout of the requested repository, or the run created it - so a data
-directory a typo pointed the action at is never deleted; never for an invalid
-invocation (a mistyped ref, a wrong repository); and only after the remote
-answered a probe, since deleting a working tree cannot fix an outage. A fetch
+a checkout of the requested repository (by its origin url, or, when a torn
+config lost the url, by alternates still pointing into this run's reference
+store), or the run created it - so a data directory a typo pointed the action
+at is never deleted; never for an invalid invocation (a mistyped ref, a wrong
+repository); and only after the remote answered a probe, since deleting a
+working tree cannot fix an outage. A fetch
 that merely kept failing - a dying pack transfer, a proxy, a full disk -
 deletes nothing and ends the run with an exit code of its own (3): at this
 size a failing transfer is routine, and no local deletion fixes it. The

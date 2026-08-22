@@ -665,6 +665,38 @@ has "  refusing the reclone for a dir that was never a store" "never identified"
 is  "  and its content survives" PRECIOUS "$(cat "$T/preciousR/artifact.bin" 2>/dev/null)"
 rm -rf "$T/preciousR"
 
+# --- a checkout that lost its url still bears the action's signature ------
+if [ "$HAVE_PERM" ]; then
+	rm -rf "$W/srcL"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcL --target-ref main
+	rc_is "prep: a checkout to tear the url out of" 0
+	git -C "$W/srcL" config --unset remote.origin.url
+	mkdir -p "$W/srcL/debris"; echo junk > "$W/srcL/debris/f"; chmod a-w "$W/srcL/debris"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcL --target-ref main --clean
+	rc_is "a target with no url but our alternates self-heals" 0
+	has "  through the full reclone" "deleting the checkout"
+	[ -e "$W/srcL/debris" ] && bad "  which removes the debris" || ok "  which removes the debris"
+	is  "  and checks out the ref" ten "$(cat "$W/srcL/a")"
+else
+	skip "a target with no url but our alternates (deletion is not blocked here)"
+fi
+
+# --- a contradicting url earns the repair, never the delete ---------------
+if [ "$HAVE_PERM" ]; then
+	rm -rf "$W/srcM"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcM --target-ref main
+	rc_is "prep: a checkout to point at another repository" 0
+	git -C "$W/srcM" config remote.origin.url "$T/second.git"
+	mkdir -p "$W/srcM/debris"; echo junk > "$W/srcM/debris/f"; chmod a-w "$W/srcM/debris"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcM --target-ref main --clean
+	[ "$RC" != 0 ] && ok "a target naming another repository is never deleted" || bad "a target naming another repository is never deleted (rc=$RC)"
+	has "  and says why" "never identified"
+	is  "  its undeletable content survives" junk "$(cat "$W/srcM/debris/f" 2>/dev/null)"
+	chmod -R u+rwX "$W/srcM" 2>/dev/null; rm -rf "$W/srcM"
+else
+	skip "a contradicting url is never deleted (deletion is not blocked here)"
+fi
+
 # --- the last rung never fires for a mistake ------------------------------
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref no-such-ref
 [ "$RC" != 0 ] && ok "an unknown ref still fails" || bad "an unknown ref still fails (rc=$RC)"

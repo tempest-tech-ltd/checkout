@@ -902,6 +902,17 @@ else
 		# A matching origin on a sound layout is what later earns the
 		# delete rung; damage found after this point does not revoke it.
 		[ "$RC" -eq 0 ] && TARGET_TRUSTED="matched"
+		# A checkout whose torn config lost the url still bears this
+		# action's signature: alternates pointing into this run's reference
+		# store, written by no one else. A data dir has no .git at all, and
+		# another repository's checkout borrows from elsewhere - while one
+		# that names another repository outright is RC_INVALID here, so it
+		# is repaired below but never deleted. Without --ref-dir there is
+		# no store to compare against, and check_alternates would answer
+		# yes for free.
+		if [ "$RC" -eq "$RC_DAMAGE" ] && [ "$REF_DIR" ] && check_alternates "$TARGET_DIR" 2>/dev/null; then
+			TARGET_TRUSTED="alternates"
+		fi
 		# A target naming another repository is damage, not a refusal: the
 		# no-rebind rule protects a store other checkouts borrow from, and
 		# a target lends nothing. All it costs is a working tree the
