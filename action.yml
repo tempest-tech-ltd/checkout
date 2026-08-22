@@ -4,7 +4,9 @@ inputs:
   repository:
     description: |
       GitHub repository name (e.g., owner/repo) or direct HTTPS Git repository URL (e.g., https://git.example.com/repo.git).
-      Other transports are not supported; credentials in the url are refused - pass a token instead.
+      Other transports are not supported. Credentials in the url authority are
+      refused - pass a token instead - and never put a secret in a query
+      string: urls travel into logs and repository configs.
       Default: GITHUB_REPOSITORY
   token:
     description: |

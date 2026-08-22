@@ -82,6 +82,13 @@ GIT_CONFIG_KEY_1=core.hooksPath
 GIT_CONFIG_VALUE_1=$HOOKS_OFF
 export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
 
+# A url as diagnostics may show it: without the query string, which is the
+# one part that carries a secret by mistake. The full value stays in use
+# internally.
+shown() {
+	printf '%s\n' "${1%%\?*}"
+}
+
 # $1 if it is a whole number, $2 otherwise. The retry and maintenance knobs
 # come from the environment, and a stray value must not be able to crash
 # shell arithmetic - dash aborts the script on it - or silently disable a
@@ -222,7 +229,7 @@ check_stored_identity() {
 	# token for an adopted url, only for one the caller named.
 	[ -z "$URL" ] && URL=$CURRENT && return 0
 	same_repo "$CURRENT" "$URL" && return 0
-	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
+	echo "Error: $1 belongs to $(shown "$CURRENT"), not to $(shown "$URL")" >&2
 	return $RC_INVALID
 }
 
@@ -239,7 +246,7 @@ check_identity() {
 	fi
 	[ -z "$URL" ] && URL=$CURRENT && return 0
 	same_repo "$CURRENT" "$URL" && return 0
-	echo "Error: $1 belongs to $CURRENT, not to $URL" >&2
+	echo "Error: $1 belongs to $(shown "$CURRENT"), not to $(shown "$URL")" >&2
 	return $RC_INVALID
 }
 
@@ -365,7 +372,7 @@ fetch_repo() {
 	# decides the answer.
 	EFFECTIVE=$(git -C "$DIR" ls-remote --get-url "$URL") || return $RC_DAMAGE
 	if ! same_repo "$EFFECTIVE" "$URL"; then
-		echo "Error: git config rewrites '$URL' to '$EFFECTIVE' - remove the url.*.insteadOf entry" >&2
+		echo "Error: git config rewrites '$(shown "$URL")' to '$(shown "$EFFECTIVE")' - remove the url.*.insteadOf entry" >&2
 		return $RC_INVALID
 	fi
 	grant_token
@@ -419,34 +426,36 @@ probe_remote() {
 # live there.
 replace_repo() {
 	TRASH=$1.gone
-	# The trash path must not touch anything this run works on: a store or
-	# a target that happens to live at or under <dir>.gone would be cleared
-	# with it.
+	JOURNAL=$1.gone-journal
+	# Neither reserved path may touch anything this run works on: a store
+	# or a target living at or under one of them would be cleared with it.
 	case "$REF_DIR" in
-		"$TRASH" | "$TRASH"/* )
-			echo "Error: the reference dir is inside $TRASH" >&2
+		"$TRASH" | "$TRASH"/* | "$JOURNAL" | "$JOURNAL"/* )
+			echo "Error: the reference dir is inside $TRASH or its journal" >&2
 			return $RC_DAMAGE ;;
 	esac
 	case "$TARGET_DIR" in
-		"$TRASH" | "$TRASH"/* )
-			echo "Error: the target dir is inside $TRASH" >&2
+		"$TRASH" | "$TRASH"/* | "$JOURNAL" | "$JOURNAL"/* )
+			echo "Error: the target dir is inside $TRASH or its journal" >&2
 			return $RC_DAMAGE ;;
 	esac
-	# No repair leaves a symlink behind - mv moves a directory - so one at
-	# this name is somebody else's, and even reading through it is not ours
-	# to do.
-	if [ -L "$TRASH" ]; then
-		echo "Error: $TRASH is a symlink, which no repair leaves behind; move it away" >&2
+	# No repair leaves a symlink behind at either name - mv moves a
+	# directory and mkdir makes one - so a symlink is somebody else's, and
+	# even reading through it is not ours to do.
+	if [ -L "$TRASH" ] || [ -L "$JOURNAL" ]; then
+		echo "Error: $TRASH or its journal is a symlink, which no repair leaves behind; move it away" >&2
 		return $RC_DAMAGE
 	fi
 	if [ -e "$TRASH" ]; then
 		# Cleared only after proving itself a leftover on two counts: the
-		# marker the rename writes into it, and the stored origin of the
-		# repo it is a copy of. Identity alone would also match a
-		# same-origin backup somebody parked at this name; a marker alone
-		# could sit in anything. Everything else is refused and named so a
-		# human can move it away.
-		if [ -f "$TRASH/.checkout-gone" ] \
+		# journal this mechanism wrote beside it before the rename, and
+		# the stored origin of the repo it is a copy of. Identity alone
+		# would also match a same-origin backup somebody parked at this
+		# name, and nothing inside the moved tree counts as proof - repo
+		# content is not this mechanism's writing. Everything else is
+		# refused and named so a human can move it away.
+		if [ -f "$JOURNAL/origin" ] \
+			&& same_repo "$(cat "$JOURNAL/origin" 2>/dev/null)" "$URL" \
 			&& { check_stored_identity "$TRASH" 2>/dev/null \
 				|| check_stored_identity "$TRASH/.git" 2>/dev/null; }; then
 			echo "Warning: clearing $TRASH left behind by an earlier repair"
@@ -458,27 +467,38 @@ replace_repo() {
 		fi
 	fi
 	[ -e "$TRASH" ] && { echo "Error: cannot clear $TRASH" >&2; return $RC_DAMAGE; }
-	mv -- "$1" "$TRASH" || { echo "Error: cannot move $1 aside" >&2; return $RC_DAMAGE; }
-	# The marker that lets the next run tell this leftover from a
-	# same-origin backup. Best effort: an unmarked leftover is refused,
-	# never mistaken for foreign data.
-	printf '%s\n' "$URL" > "$TRASH/.checkout-gone" 2>/dev/null || true
+	# The journal opens the transaction before the rename, so a crash at
+	# any later point leaves a pair the next run can prove and collect. A
+	# journal with no trash is a crash before the rename: nothing moved,
+	# nothing to collect.
+	rm -rf -- "$JOURNAL" 2>/dev/null
+	mkdir -- "$JOURNAL" || { echo "Error: cannot open the journal $JOURNAL" >&2; return $RC_DAMAGE; }
+	printf '%s\n' "$URL" > "$JOURNAL/origin" || { rm -rf -- "$JOURNAL"; return $RC_DAMAGE; }
+	if ! mv -- "$1" "$TRASH"; then
+		echo "Error: cannot move $1 aside" >&2
+		rm -rf -- "$JOURNAL"
+		return $RC_DAMAGE
+	fi
 	REPL_RC=0; "$2" "$1" || REPL_RC=$?
 	if [ "$REPL_RC" -eq 0 ]; then
 		chmod -R -- u+rwX "$TRASH" 2>/dev/null || true
 		rm -rf -- "$TRASH" 2>/dev/null || true
-		[ -e "$TRASH" ] && echo "Warning: the old content is left at $TRASH" >&2
+		if [ -e "$TRASH" ]; then
+			echo "Warning: the old content is left at $TRASH" >&2
+		else
+			rm -rf -- "$JOURNAL" 2>/dev/null
+		fi
 		return 0
 	fi
 	# The failed clone has to leave before the old content returns: mv onto
-	# an existing directory nests instead of replacing, silently. The marker
-	# leaves first - restored content is live again, not a leftover.
+	# an existing directory nests instead of replacing, silently.
 	rm -rf -- "$1" 2>/dev/null
 	if [ -e "$1" ]; then
 		echo "Error: cannot clear the failed clone at $1; the old content is at $TRASH" >&2
+	elif mv -- "$TRASH" "$1"; then
+		rm -rf -- "$JOURNAL" 2>/dev/null
 	else
-		rm -f -- "$TRASH/.checkout-gone" 2>/dev/null
-		mv -- "$TRASH" "$1" || echo "Error: the old content is stranded at $TRASH" >&2
+		echo "Error: the old content is stranded at $TRASH" >&2
 	fi
 	return $REPL_RC
 }
@@ -558,7 +578,7 @@ ensure_ref_repo() {
 			if [ -z "$URL" ]; then
 				URL=$SALVAGED
 			elif ! same_repo "$SALVAGED" "$URL"; then
-				echo "Error: $1 has an unreadable config; its origin reads '$SALVAGED', not '$URL'" >&2
+				echo "Error: $1 has an unreadable config; its origin reads '$(shown "$SALVAGED")', not '$(shown "$URL")'" >&2
 				return $RC_INVALID
 			fi
 			REF_IDENTIFIED="salvaged"
@@ -609,7 +629,7 @@ ensure_ref_repo() {
 	# Deleting is earned by identity, not by damage: without an origin that
 	# matched, this dir was never shown to be a store of $URL at all.
 	if [ -z "$REF_IDENTIFIED" ]; then
-		echo "Warning: not deleting $1 - it was never identified as a store of $URL" >&2
+		echo "Warning: not deleting $1 - it was never identified as a store of $(shown "$URL")" >&2
 		return $RC
 	fi
 	STORE_ABS=$(deletable_dir "$1") || {
@@ -622,7 +642,7 @@ ensure_ref_repo() {
 	# by its own ladder - usually the .git rebuild is enough, and a clone is
 	# behind it.
 	if ! probe_remote "$STORE_ABS"; then
-		echo "Error: $URL is not answering; keeping $1 rather than deleting what could not be recloned" >&2
+		echo "Error: $(shown "$URL") is not answering; keeping $1 rather than deleting what could not be recloned" >&2
 		return $RC
 	fi
 	echo "Warning: the repair was not enough, deleting the store $1 and recloning it from scratch"
@@ -750,7 +770,7 @@ recover_target_repo() {
 # deleting cannot fix.
 nuke_target_repo() {
 	if [ -z "$TARGET_TRUSTED" ]; then
-		echo "Warning: not deleting $1 - it was never identified as a checkout of $URL" >&2
+		echo "Warning: not deleting $1 - it was never identified as a checkout of $(shown "$URL")" >&2
 		return $RC_DAMAGE
 	fi
 	TARGET_ABS=$(deletable_dir "$1") || {
@@ -776,7 +796,7 @@ nuke_target_repo() {
 		return $RC_DAMAGE
 	}
 	if ! probe_remote "$TARGET_ABS"; then
-		echo "Error: $URL is not answering; keeping $1 rather than deleting what could not be recloned" >&2
+		echo "Error: $(shown "$URL") is not answering; keeping $1 rather than deleting what could not be recloned" >&2
 		return $RC_DAMAGE
 	fi
 	echo "Warning: repairs were not enough, deleting the checkout $1 and cloning it from scratch"
@@ -876,7 +896,12 @@ checkout() {
 	# An object that cannot be read at all is damage - a refetch may heal.
 	WANT=$(git -C "$1" rev-parse --verify --quiet "$RESOLVED^{commit}")
 	if [ -z "$WANT" ]; then
-		if git -C "$1" cat-file -e "$RESOLVED" 2>/dev/null; then
+		# ^{} peels the whole chain: reaching a final object that is not a
+		# commit is the caller's mistake, while a chain that cannot be
+		# walked - an annotated tag whose referent is gone - is damage a
+		# refetch may heal. cat-file on the ref would conflate the two: it
+		# proves only that the outermost object reads.
+		if git -C "$1" rev-parse --verify --quiet "$RESOLVED^{}" >/dev/null 2>&1; then
 			echo "Error: target ref does not point to a commit: $2" >&2
 			return $RC_INVALID
 		fi
@@ -975,6 +1000,7 @@ target_steps() {
 
 URL=
 URL_FROM_CALLER=
+DEBUG_TRACE=
 REF_DIR=
 TARGET_DIR=
 TARGET_REF=
@@ -1010,7 +1036,10 @@ while [ $# -gt 0 ]; do
 			shift
 			;;
 		--debug)
-			set -x
+			# Enabled only after the url is judged: tracing the parse
+			# would echo a credential smuggled in the url before the
+			# refusal below could fire.
+			DEBUG_TRACE=1
 			shift
 			;;
 		-h|--help)
@@ -1038,6 +1067,8 @@ case "$URL" in
 				exit $RC_INVALID ;;
 		esac ;;
 esac
+
+[ "$DEBUG_TRACE" ] && set -x
 
 if [ "$TARGET_REF" ] && [ -z "$TARGET_DIR" ]; then
 	echo "Error: --target-ref requires --target-dir"
@@ -1068,6 +1099,26 @@ if [ "$REF_DIR" ]; then
 fi
 
 [ -z "$TARGET_DIR" ] && exit 0
+
+# The requested ref is judged against the store before the target is touched:
+# the store just fetched the same refspecs, so a name it cannot resolve does
+# not exist upstream, and a ref that peels to a non-commit never will - while
+# learning either after a repair or a clean would mean the invalid invocation
+# had already cost something. Only names are judged early: a bare object id
+# may name a commit that lives in the target alone, and an object the store
+# cannot read is not judged either - that is damage, the target ladder's to
+# walk.
+if [ "$TARGET_REF" ] && [ "$REF_DIR" ]; then
+	case "$TARGET_REF" in
+		*[!0-9a-fA-F]* )
+			EARLY=$(resolve_ref "$REF_DIR" "$TARGET_REF") || exit $?
+			if ! git -C "$REF_DIR" rev-parse --verify --quiet "$EARLY^{commit}" >/dev/null 2>&1 \
+				&& git -C "$REF_DIR" rev-parse --verify --quiet "$EARLY^{}" >/dev/null 2>&1; then
+				echo "Error: target ref does not point to a commit: $TARGET_REF" >&2
+				exit $RC_INVALID
+			fi ;;
+	esac
+fi
 
 # A target that is not a usable repo is rebuilt before anything else; only
 # then are the steps tried. A repairable failure climbs a ladder: the steps

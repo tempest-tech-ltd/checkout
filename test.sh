@@ -422,14 +422,34 @@ cd "$T/seed"; git checkout -q main; git tag blobtag "$(git rev-parse HEAD:a)"
 git push -q "$T/origin.git" refs/tags/blobtag; cd /
 git -C "$W/src" branch -q keepme3 2>/dev/null
 echo SENTINEL > "$W/src/untracked-sentinel"
-RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref refs/tags/blobtag
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref refs/tags/blobtag --clean
 rc_is "a tag pointing at a blob is a caller mistake" 2
 has "  and says so" "does not point to a commit"
 hasnt "  with no self-heal fired" "SELF-HEAL:"
 git -C "$W/src" show-ref --verify --quiet refs/heads/keepme3 \
     && ok "  local branches survive" || bad "  local branches survive"
-is  "  and untracked content too" SENTINEL "$(cat "$W/src/untracked-sentinel" 2>/dev/null)"
+is  "  and untracked content outruns even --clean" SENTINEL "$(cat "$W/src/untracked-sentinel" 2>/dev/null)"
 rm -f "$W/src/untracked-sentinel"; git -C "$W/src" branch -q -D keepme3 2>/dev/null
+
+# --- an invalid ref costs nothing even on a damaged target -----------------
+git -C "$W/src" branch -q keepme4 2>/dev/null
+git -C "$W/src" update-index --assume-unchanged a
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref no-such-ref --clean
+rc_is "an unknown ref on a damaged target is still a refusal" 2
+hasnt "  with no rebuild first" "$RECOVER"
+hasnt "  and no self-heal" "SELF-HEAL:"
+git -C "$W/src" show-ref --verify --quiet refs/heads/keepme4 \
+    && ok "  local branches survive" || bad "  local branches survive"
+git -C "$W/src" update-index --no-assume-unchanged a 2>/dev/null
+git -C "$W/src" branch -q -D keepme4 2>/dev/null
+
+echo KEEPME > "$W/src/untracked-probe"
+head -c 300 /dev/urandom > "$W/src/.git/index"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref no-such-ref --clean
+rc_is "an unknown ref outruns a corrupt index and clean" 2
+is  "  untracked content survives" KEEPME "$(cat "$W/src/untracked-probe" 2>/dev/null)"
+rm -f "$W/src/untracked-probe"
+RUN "$W" "${ARGS[@]}";                       rc_is "prep: the index is healed again" 0
 
 # --- a work tree pointed somewhere else ---------------------------------
 mkdir -p "$T/elsewhere"; echo SENTINEL > "$T/elsewhere/artifact"
@@ -713,16 +733,19 @@ if [ "$HAVE_PERM" ]; then
 	[ "$RC" != 0 ] && ok "the reclone refuses a trash path it does not own" || bad "the reclone refuses a trash path it does not own (rc=$RC)"
 	has "  and says why" "not an earlier repair's leftover"
 	is  "  the squatter survives" DATA "$(cat "$W/srcP.gone/keep.txt" 2>/dev/null)"
-	rm -rf "$W/srcP.gone"; cp -r "$W/srcP" "$W/srcP.gone"
+	rm -rf "$W/srcP.gone" "$W/srcP.gone-journal"; cp -r "$W/srcP" "$W/srcP.gone"
+	echo x > "$W/srcP.gone/.checkout-gone"
 	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main --clean
 	[ "$RC" != 0 ] && ok "a same-origin backup at the name is not a leftover" || bad "a same-origin backup at the name is not a leftover (rc=$RC)"
 	has "  identity alone does not clear it" "not an earlier repair's leftover"
-	[ -d "$W/srcP.gone/.git" ] && ok "  the backup survives" || bad "  the backup survives"
-	echo x > "$W/srcP.gone/.checkout-gone"
+	[ -d "$W/srcP.gone/.git" ] && ok "  the backup survives, in-tree marker files and all" || bad "  the backup survives, in-tree marker files and all"
+	# The pair a crash after the rename leaves behind: journal plus trash.
+	mkdir -p "$W/srcP.gone-journal"; printf '%s\n' "$T/origin.git" > "$W/srcP.gone-journal/origin"
 	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main --clean
-	rc_is "a marked same-origin leftover is cleared" 0
+	rc_is "a journaled leftover is collected" 0
 	has "  with the clearing announced" "left behind by an earlier repair"
 	[ -e "$W/srcP.gone" ] && bad "  and gone afterwards" || ok "  and gone afterwards"
+	[ -e "$W/srcP.gone-journal" ] && bad "  the journal too" || ok "  the journal too"
 else
 	skip "a trash-path squatter is never cleared (deletion is not blocked here)"
 fi
@@ -1007,6 +1030,10 @@ RUN "$W" --repo "https://user:pass@127.0.0.1/x" --ref-dir refU.git
 [ "$RC" != 0 ] && ok "credentials in the url are refused" || bad "credentials in the url are refused (rc=$RC)"
 has "  pointing at the token input" "pass a token instead"
 [ -d "$W/refU.git" ] && bad "  before creating anything" || ok "  before creating anything"
+
+OUT=$(cd "$W" && "$SH" "$SCRIPT" --debug --repo "https://user:SECRETQ@127.0.0.1/x" --ref-dir refW.git 2>&1); RC=$?
+rc_is "credentials with --debug are still refused" 2
+hasnt "  and never reach the trace" "SECRETQ"
 
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"

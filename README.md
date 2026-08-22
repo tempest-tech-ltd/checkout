@@ -100,10 +100,12 @@ the clone goes to the original path, and a clone that fails puts the old
 content back. Disk usage briefly peaks at old plus new. When the old content
 can be neither removed nor restored, it stays at `<dir>.gone` - named in a
 warning - and the next run through this rung clears that leftover only after
-it proves to be one on two counts: the marker the rename writes inside it,
-and the stored origin of the repository it is a copy of. A same-origin backup
-parked at that name carries no marker; a symlink is nobody's leftover at all -
-both are refused and have to be moved away by hand.
+it proves to be one on two counts: the transaction journal this mechanism
+opened beside it (`<dir>.gone-journal`) before the rename, and the stored
+origin of the repository it is a copy of. Nothing inside the moved tree
+counts as proof - repository content is not this mechanism's writing - so a
+same-origin backup parked at the name is refused, and a symlink there is
+nobody's leftover at all; both have to be moved away by hand.
 
 Every rung that fires announces itself on one machine-greppable line -
 `SELF-HEAL: <store|target> rung=<reinit|rebuild|reclone> dir=<path>` - so a
@@ -124,8 +126,11 @@ identity, and never while the remote does not answer. A checkout that
 borrowed objects the new store no longer holds is healed by its own ladder
 when it next runs - usually the `.git` rebuild is enough.
 
-A ref that does not exist is treated as a caller mistake, not as damage - it
-fails without recreating anything. So does a reference dir belonging to another
+A ref that does not exist, or that does not point at a commit, is treated as a
+caller mistake, not as damage - and it is judged against the reference store
+before the target is touched, so it cannot cost a clean or a repair either.
+(Only a ref given as a bare object id skips that early judgement: it may name
+a commit that lives in the target alone.) So does a reference dir belonging to another
 repository: repair does not rebind a store that other checkouts borrow from. A
 target naming another repository is rebuilt instead: it lends its objects to
 nobody, and all a rebuild costs there is a working tree the checkout replaces
@@ -160,7 +165,10 @@ before the verification that follows it; `reference-transaction` runs inside
 anything that writes a ref, which includes the fetch - either can change
 tracked files on a run that then reports success. The rest of the local config
 is left alone: filters and `.git/info/attributes` shape the content of the
-working tree by design, which is what git-lfs is.
+working tree by design, which is what git-lfs is. No credential is available
+to filters, though - the token is scoped to the fetches and the remote probe -
+so a private LFS endpoint needs credentials of its own (v2 leaving the token
+behind in every config was a leak, not a feature).
 
 A target with linked work trees registered under its `.git` is used as it is
 but never rebuilt: their administrative files live there and nowhere else, so
