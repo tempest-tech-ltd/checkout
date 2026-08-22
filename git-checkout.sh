@@ -415,6 +415,27 @@ probe_remote() {
 	return $PROBE_RC
 }
 
+# Whether $1 is this mechanism's journal and nothing else: a real directory
+# holding exactly the one file the transaction wrote, naming this very
+# repository. Anything else at the reserved name was not written here and is
+# not this mechanism's to remove.
+journal_ours() {
+	[ -d "$1" ] || return 1
+	[ -L "$1" ] && return 1
+	[ -f "$1/origin" ] || return 1
+	[ -L "$1/origin" ] && return 1
+	[ "$(find "$1" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" = 1 ] || return 1
+	same_repo "$(cat "$1/origin" 2>/dev/null)" "$URL"
+}
+
+# Closes a journal journal_ours vouched for, without recursion: only the file
+# the transaction wrote is removed, so anything unexpected that appeared
+# since keeps the rmdir from destroying it.
+close_journal() {
+	rm -f -- "$1/origin" 2>/dev/null
+	rmdir -- "$1" 2>/dev/null || echo "Warning: could not close the journal $1" >&2
+}
+
 # Deletion by rename first: mv of a directory is atomic where rm -rf is not.
 # An open handle - normal on git-bash - fails the whole rename and the repo
 # stays untouched, instead of failing halfway through a delete. The clone
@@ -454,8 +475,7 @@ replace_repo() {
 		# name, and nothing inside the moved tree counts as proof - repo
 		# content is not this mechanism's writing. Everything else is
 		# refused and named so a human can move it away.
-		if [ -f "$JOURNAL/origin" ] \
-			&& same_repo "$(cat "$JOURNAL/origin" 2>/dev/null)" "$URL" \
+		if journal_ours "$JOURNAL" \
 			&& { check_stored_identity "$TRASH" 2>/dev/null \
 				|| check_stored_identity "$TRASH/.git" 2>/dev/null; }; then
 			echo "Warning: clearing $TRASH left behind by an earlier repair"
@@ -469,14 +489,23 @@ replace_repo() {
 	[ -e "$TRASH" ] && { echo "Error: cannot clear $TRASH" >&2; return $RC_DAMAGE; }
 	# The journal opens the transaction before the rename, so a crash at
 	# any later point leaves a pair the next run can prove and collect. A
-	# journal with no trash is a crash before the rename: nothing moved,
-	# nothing to collect.
-	rm -rf -- "$JOURNAL" 2>/dev/null
+	# journal alone is a crash before the rename - nothing moved, nothing
+	# to collect - and it is closed, never recursively removed: anything
+	# else squatting at the reserved name is refused, exactly like the
+	# trash path itself.
+	if [ -e "$JOURNAL" ]; then
+		if journal_ours "$JOURNAL"; then
+			close_journal "$JOURNAL"
+		else
+			echo "Error: $JOURNAL exists and is not this mechanism's journal; move it away" >&2
+			return $RC_DAMAGE
+		fi
+	fi
 	mkdir -- "$JOURNAL" || { echo "Error: cannot open the journal $JOURNAL" >&2; return $RC_DAMAGE; }
-	printf '%s\n' "$URL" > "$JOURNAL/origin" || { rm -rf -- "$JOURNAL"; return $RC_DAMAGE; }
+	printf '%s\n' "$URL" > "$JOURNAL/origin" || { close_journal "$JOURNAL"; return $RC_DAMAGE; }
 	if ! mv -- "$1" "$TRASH"; then
 		echo "Error: cannot move $1 aside" >&2
-		rm -rf -- "$JOURNAL"
+		close_journal "$JOURNAL"
 		return $RC_DAMAGE
 	fi
 	REPL_RC=0; "$2" "$1" || REPL_RC=$?
@@ -486,7 +515,7 @@ replace_repo() {
 		if [ -e "$TRASH" ]; then
 			echo "Warning: the old content is left at $TRASH" >&2
 		else
-			rm -rf -- "$JOURNAL" 2>/dev/null
+			close_journal "$JOURNAL"
 		fi
 		return 0
 	fi
@@ -496,7 +525,7 @@ replace_repo() {
 	if [ -e "$1" ]; then
 		echo "Error: cannot clear the failed clone at $1; the old content is at $TRASH" >&2
 	elif mv -- "$TRASH" "$1"; then
-		rm -rf -- "$JOURNAL" 2>/dev/null
+		close_journal "$JOURNAL"
 	else
 		echo "Error: the old content is stranded at $TRASH" >&2
 	fi
@@ -981,6 +1010,19 @@ target_steps() {
 	has_held_paths "$1" && { echo "Warning: $1 has paths held back by skip-worktree or assume-unchanged" >&2; return $RC_DAMAGE; }
 	set_refspecs "$1" || return $?
 	fetch_repo "$1" fetch --prune --force --recurse-submodules=no || return $?
+	# The ref is judged once more here, after this fetch and before clean:
+	# for a run without a reference store this is its first judgement, and
+	# for every run it closes the window where the remote changed between
+	# the store fetch and this one. From here to the checkout there is no
+	# further fetch, so what this resolves is what gets checked out.
+	if [ "$TARGET_REF" ]; then
+		STEP_REF=$(resolve_ref "$1" "$TARGET_REF") || return $?
+		if ! git -C "$1" rev-parse --verify --quiet "$STEP_REF^{commit}" >/dev/null 2>&1 \
+			&& git -C "$1" rev-parse --verify --quiet "$STEP_REF^{}" >/dev/null 2>&1; then
+			echo "Error: target ref does not point to a commit: $TARGET_REF" >&2
+			return $RC_INVALID
+		fi
+	fi
 	if [ "$CLEAN" ]; then
 		clean "$1" || return $?
 	fi
@@ -1104,20 +1146,36 @@ fi
 # the store just fetched the same refspecs, so a name it cannot resolve does
 # not exist upstream, and a ref that peels to a non-commit never will - while
 # learning either after a repair or a clean would mean the invalid invocation
-# had already cost something. Only names are judged early: a bare object id
-# may name a commit that lives in the target alone, and an object the store
-# cannot read is not judged either - that is damage, the target ladder's to
+# had already cost something. A bare object id gets its documented exception
+# proven rather than assumed by its spelling: absent from the store, it must
+# resolve read-only in the target - a commit may live there alone - or the
+# invocation is refused before anything is repaired or cleaned. An object the
+# store cannot read is not judged: that is damage, the target ladder's to
 # walk.
 if [ "$TARGET_REF" ] && [ "$REF_DIR" ]; then
-	case "$TARGET_REF" in
-		*[!0-9a-fA-F]* )
-			EARLY=$(resolve_ref "$REF_DIR" "$TARGET_REF") || exit $?
-			if ! git -C "$REF_DIR" rev-parse --verify --quiet "$EARLY^{commit}" >/dev/null 2>&1 \
-				&& git -C "$REF_DIR" rev-parse --verify --quiet "$EARLY^{}" >/dev/null 2>&1; then
-				echo "Error: target ref does not point to a commit: $TARGET_REF" >&2
-				exit $RC_INVALID
-			fi ;;
-	esac
+	EARLY=$(resolve_ref "$REF_DIR" "$TARGET_REF" 2>/dev/null) || EARLY=
+	if [ "$EARLY" ]; then
+		if ! git -C "$REF_DIR" rev-parse --verify --quiet "$EARLY^{commit}" >/dev/null 2>&1 \
+			&& git -C "$REF_DIR" rev-parse --verify --quiet "$EARLY^{}" >/dev/null 2>&1; then
+			echo "Error: target ref does not point to a commit: $TARGET_REF" >&2
+			exit $RC_INVALID
+		fi
+	else
+		case "$TARGET_REF" in
+			*[!0-9a-fA-F]* )
+				echo "Error: target ref does not exist: $TARGET_REF" >&2
+				exit $RC_INVALID ;;
+			* )
+				EARLY_HEX=$(printf '%s' "$TARGET_REF" | tr 'A-F' 'a-f')
+				EARLY=$(git -C "$TARGET_DIR" rev-parse --verify --quiet "$EARLY_HEX^{commit}" 2>/dev/null)
+				case "$EARLY" in
+					"$EARLY_HEX"* ) ;;
+					* )
+						echo "Error: target ref does not exist: $TARGET_REF" >&2
+						exit $RC_INVALID ;;
+				esac ;;
+		esac
+	fi
 fi
 
 # A target that is not a usable repo is rebuilt before anything else; only

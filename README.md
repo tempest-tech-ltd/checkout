@@ -128,9 +128,13 @@ when it next runs - usually the `.git` rebuild is enough.
 
 A ref that does not exist, or that does not point at a commit, is treated as a
 caller mistake, not as damage - and it is judged against the reference store
-before the target is touched, so it cannot cost a clean or a repair either.
-(Only a ref given as a bare object id skips that early judgement: it may name
-a commit that lives in the target alone.) So does a reference dir belonging to another
+before the target is touched, so it cannot cost a clean or a repair either. A
+bare object id absent from the store must resolve read-only in the target - a
+commit may live there alone - or the invocation is refused just as early. The
+ref is judged once more inside the target, after its own fetch and before any
+clean: that is the first judgement for a run without a reference store, and
+for every run it closes the window in which the remote changed between the
+two fetches. So does a reference dir belonging to another
 repository: repair does not rebind a store that other checkouts borrow from. A
 target naming another repository is rebuilt instead: it lends its objects to
 nobody, and all a rebuild costs there is a working tree the checkout replaces

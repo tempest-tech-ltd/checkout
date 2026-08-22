@@ -350,8 +350,13 @@ RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref
 rc_is "prep: a hex-named branch" 0
 git -C "$T/seed" push -q "$T/origin.git" --delete cafe
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref main
-RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref cafe
+echo KEEPME > "$W/srcH/untracked-probe"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcH --target-ref cafe --clean
 [ "$RC" != 0 ] && ok "a hex-named branch deleted upstream fails" || bad "a hex-named branch deleted upstream fails (rc=$RC)"
+hasnt "  without a rebuild first" "$RECOVER"
+hasnt "  nor any self-heal" "SELF-HEAL:"
+is  "  and untracked content outruns --clean" KEEPME "$(cat "$W/srcH/untracked-probe" 2>/dev/null)"
+rm -f "$W/srcH/untracked-probe"
 
 # --- a commit id still works -------------------------------------------
 SHA_MAIN=$(git -C "$T/seed" rev-parse HEAD)
@@ -363,6 +368,16 @@ RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcU \
 	--target-ref "$(printf '%s' "$SHA_MAIN" | tr 'a-f' 'A-F')"
 rc_is "a commit id in upper case" 0
 is  "  lands on that commit" "$SHA_MAIN" "$(git -C "$W/srcU" rev-parse HEAD)"
+
+# --- a commit that lives in the target alone ------------------------------
+git -C "$W/srcU" checkout -q --detach
+git -C "$W/srcU" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local-only
+SHA_LOCAL=$(git -C "$W/srcU" rev-parse HEAD)
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcU --target-ref "$SHA_LOCAL"
+rc_is "a commit id only the target holds still works" 0
+is  "  and lands on it" "$SHA_LOCAL" "$(git -C "$W/srcU" rev-parse HEAD)"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcU --target-ref main
+rc_is "prep: back on a branch" 0
 
 # --- skip-worktree and sparse checkout ---------------------------------
 RUN "$W" "${ARGS[@]}"
@@ -1034,6 +1049,37 @@ has "  pointing at the token input" "pass a token instead"
 OUT=$(cd "$W" && "$SH" "$SCRIPT" --debug --repo "https://user:SECRETQ@127.0.0.1/x" --ref-dir refW.git 2>&1); RC=$?
 rc_is "credentials with --debug are still refused" 2
 hasnt "  and never reach the trace" "SECRETQ"
+
+# --- an unknown ref without a store still costs nothing --------------------
+rm -rf "$W/srcJ2"; git clone -q "$T/origin.git" "$W/srcJ2"
+echo KEEPME > "$W/srcJ2/untracked-probe"
+RUN "$W" --repo "$T/origin.git" --target-dir srcJ2 --target-ref no-such-ref --clean
+rc_is "an unknown ref without a store is judged before clean" 2
+is  "  and untracked content survives" KEEPME "$(cat "$W/srcJ2/untracked-probe" 2>/dev/null)"
+
+# --- an unowned journal is never removed -----------------------------------
+rm -rf "$W/refJ.git" "$W/refJ.git.gone-journal"
+RUN "$W" --repo "$T/origin.git" --ref-dir refJ.git; rc_is "prep: a store for journal squatters" 0
+echo PRECIOUS > "$W/refJ.git.gone-journal"
+rm -rf "$W/refJ.git/objects"; echo junk > "$W/refJ.git/objects"
+RUN "$W" --repo "$T/origin.git" --ref-dir refJ.git
+[ "$RC" != 0 ] && ok "a regular file at the journal name refuses the reclone" || bad "a regular file at the journal name refuses the reclone (rc=$RC)"
+has "  and says why" "not this mechanism's journal"
+is  "  the file survives" PRECIOUS "$(cat "$W/refJ.git.gone-journal" 2>/dev/null)"
+rm -f "$W/refJ.git.gone-journal"
+mkdir -p "$W/refJ.git.gone-journal"; echo KEEP > "$W/refJ.git.gone-journal/valuable"
+RUN "$W" --repo "$T/origin.git" --ref-dir refJ.git
+[ "$RC" != 0 ] && ok "a foreign dir at the journal name refuses too" || bad "a foreign dir at the journal name refuses too (rc=$RC)"
+is  "  its content survives" KEEP "$(cat "$W/refJ.git.gone-journal/valuable" 2>/dev/null)"
+printf '%s\n' "$T/origin.git" > "$W/refJ.git.gone-journal/origin"
+RUN "$W" --repo "$T/origin.git" --ref-dir refJ.git
+[ "$RC" != 0 ] && ok "an extra file inside a valid-looking journal still refuses" || bad "an extra file inside a valid-looking journal still refuses (rc=$RC)"
+is  "  and the extra survives" KEEP "$(cat "$W/refJ.git.gone-journal/valuable" 2>/dev/null)"
+rm -f "$W/refJ.git.gone-journal/valuable"
+RUN "$W" --repo "$T/origin.git" --ref-dir refJ.git
+rc_is "a stale journal of ours is closed and the reclone proceeds" 0
+has "  announcing the reclone" "recloning it from scratch"
+[ -e "$W/refJ.git.gone-journal" ] && bad "  and the journal is gone" || ok "  and the journal is gone"
 
 # --- the token must not be left in any config --------------------------
 rm -rf "$W/src6" "$W/ref6.git"
