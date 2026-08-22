@@ -100,12 +100,15 @@ the clone goes to the original path, and a clone that fails puts the old
 content back. Disk usage briefly peaks at old plus new. When the old content
 can be neither removed nor restored, it stays at `<dir>.gone` - named in a
 warning - and the next run through this rung clears that leftover only after
-it proves to be one on two counts: the transaction journal this mechanism
-opened beside it (`<dir>.gone-journal`) before the rename, and the stored
-origin of the repository it is a copy of. Nothing inside the moved tree
-counts as proof - repository content is not this mechanism's writing - so a
-same-origin backup parked at the name is refused, and a symlink there is
-nobody's leftover at all; both have to be moved away by hand.
+it proves to be one on three counts: the transaction journal this mechanism
+opened beside it (`<dir>.gone-journal`) before the rename, the journal's own
+record that its rename actually happened, and the stored origin of the
+repository the leftover is a copy of. Nothing inside the moved tree counts as
+proof - repository content is not this mechanism's writing - and a journal
+opened by a transaction that died before renaming anything vouches for
+nothing, so a same-origin backup parked at the name is refused either way; a
+symlink there is nobody's leftover at all. Everything refused has to be moved
+away by hand.
 
 Every rung that fires announces itself on one machine-greppable line -
 `SELF-HEAL: <store|target> rung=<reinit|rebuild|reclone> dir=<path>` - so a
@@ -128,13 +131,15 @@ when it next runs - usually the `.git` rebuild is enough.
 
 A ref that does not exist, or that does not point at a commit, is treated as a
 caller mistake, not as damage - and it is judged against the reference store
-before the target is touched, so it cannot cost a clean or a repair either. A
-bare object id absent from the store must resolve read-only in the target - a
-commit may live there alone - or the invocation is refused just as early. The
-ref is judged once more inside the target, after its own fetch and before any
-clean: that is the first judgement for a run without a reference store, and
-for every run it closes the window in which the remote changed between the
-two fetches. So does a reference dir belonging to another
+before the target is touched, so it cannot cost a clean or a repair either.
+Bare object ids answer to the same rule: the store keeps every object it ever
+fetched, so anything upstream ever served still resolves; a commit created
+only inside the target is not addressable when a store is in play, because
+the target may need the very repair that would delete that object's sole
+copy. (Without a store, the target's own judgement still accepts it.) The ref
+is judged once more inside the target, after its own fetch and before any
+clean, and the commit id it peels to - not the mutable name - is what the
+checkout materializes. So does a reference dir belonging to another
 repository: repair does not rebind a store that other checkouts borrow from. A
 target naming another repository is rebuilt instead: it lends its objects to
 nobody, and all a rebuild costs there is a working tree the checkout replaces

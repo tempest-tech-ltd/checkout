@@ -82,11 +82,33 @@ GIT_CONFIG_KEY_1=core.hooksPath
 GIT_CONFIG_VALUE_1=$HOOKS_OFF
 export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
 
-# A url as diagnostics may show it: without the query string, which is the
-# one part that carries a secret by mistake. The full value stays in use
-# internally.
+# Whether an https url smuggles credentials in its authority. Only the
+# authority is inspected - an '@' later in the path is somebody's name.
+url_has_userinfo() {
+	case "$1" in
+		https://* )
+			UHU=${1#https://}
+			UHU=${UHU%%/*}
+			case "$UHU" in *@* ) return 0 ;; esac ;;
+	esac
+	return 1
+}
+
+# A url as diagnostics may show it: without the query string and with the
+# authority userinfo masked - the two places a secret rides by mistake. The
+# full value stays in use internally.
 shown() {
-	printf '%s\n' "${1%%\?*}"
+	SHW=${1%%\?*}
+	case "$SHW" in
+		*://*@* )
+			SHW_SCHEME=${SHW%%://*}
+			SHW_REST=${SHW#*://}
+			SHW_AUTH=${SHW_REST%%/*}
+			case "$SHW_AUTH" in
+				*@* ) SHW=$SHW_SCHEME://***@${SHW_AUTH##*@}${SHW_REST#"$SHW_AUTH"} ;;
+			esac ;;
+	esac
+	printf '%s\n' "$SHW"
 }
 
 # $1 if it is a whole number, $2 otherwise. The retry and maintenance knobs
@@ -212,8 +234,16 @@ is_bare_repo() {
 # Reads the config file directly, so a repo too damaged for git to open still
 # gets its identity checked. Repair must never be a way to rebind a store
 # that other checkouts borrow objects from. The config-file twin of
-# check_identity below - keep the two in step.
+# check_identity below - keep the two in step. Both run with xtrace off: a
+# stored url is disk content nobody validated, and under --debug the trace
+# would print it - credentials and all - before any check could refuse it.
 check_stored_identity() {
+	CSI_XT=; case $- in *x*) CSI_XT=1; set +x ;; esac
+	CSI_RC=0; _stored_identity "$1" || CSI_RC=$?
+	[ "$CSI_XT" ] && set -x
+	return $CSI_RC
+}
+_stored_identity() {
 	[ -f "$1/config" ] || return $RC_DAMAGE
 	CFG=$1/config
 	# --get returns the last value while fetch uses the first, so more than
@@ -225,9 +255,17 @@ check_stored_identity() {
 		echo "Error: $1 has more than one distinct origin url" >&2
 		return $RC_INVALID
 	fi
-	# --repo omitted: adopt the stored url. grant_token never grants the
-	# token for an adopted url, only for one the caller named.
-	[ -z "$URL" ] && URL=$CURRENT && return 0
+	# --repo omitted: adopt the stored url - unless it carries credentials,
+	# which must neither be echoed nor spread into every later command.
+	# grant_token never grants the token for an adopted url either way.
+	if [ -z "$URL" ]; then
+		if url_has_userinfo "$CURRENT"; then
+			echo "Error: the stored origin of $1 carries credentials; refusing to adopt it" >&2
+			return $RC_INVALID
+		fi
+		URL=$CURRENT
+		return 0
+	fi
 	same_repo "$CURRENT" "$URL" && return 0
 	echo "Error: $1 belongs to $(shown "$CURRENT"), not to $(shown "$URL")" >&2
 	return $RC_INVALID
@@ -235,8 +273,14 @@ check_stored_identity() {
 
 # RC_INVALID when the repo belongs to a different remote: rebinding it would
 # point every checkout sharing this store at another project. The open-repo
-# twin of check_stored_identity above.
+# twin of check_stored_identity above, with the same xtrace discipline.
 check_identity() {
+	CI_XT=; case $- in *x*) CI_XT=1; set +x ;; esac
+	CI_RC=0; _open_identity "$1" || CI_RC=$?
+	[ "$CI_XT" ] && set -x
+	return $CI_RC
+}
+_open_identity() {
 	COUNT=$(git -C "$1" config --local --get-all remote.origin.url 2>/dev/null | sort -u | wc -l)
 	CURRENT=$(git -C "$1" config --local --get-all remote.origin.url 2>/dev/null | head -1)
 	[ -z "$CURRENT" ] && return $RC_DAMAGE
@@ -244,7 +288,14 @@ check_identity() {
 		echo "Error: $1 has more than one distinct origin url" >&2
 		return $RC_INVALID
 	fi
-	[ -z "$URL" ] && URL=$CURRENT && return 0
+	if [ -z "$URL" ]; then
+		if url_has_userinfo "$CURRENT"; then
+			echo "Error: the stored origin of $1 carries credentials; refusing to adopt it" >&2
+			return $RC_INVALID
+		fi
+		URL=$CURRENT
+		return 0
+	fi
 	same_repo "$CURRENT" "$URL" && return 0
 	echo "Error: $1 belongs to $(shown "$CURRENT"), not to $(shown "$URL")" >&2
 	return $RC_INVALID
@@ -416,23 +467,30 @@ probe_remote() {
 }
 
 # Whether $1 is this mechanism's journal and nothing else: a real directory
-# holding exactly the one file the transaction wrote, naming this very
-# repository. Anything else at the reserved name was not written here and is
-# not this mechanism's to remove.
+# holding the file the transaction wrote when it opened - and, once the
+# rename actually happened, the 'moved' flag written right after it. That
+# flag is what binds a journal to its own trash: a journal opened by a
+# transaction that died before renaming anything must never vouch for
+# whatever appears at the trash name later. Anything shaped differently was
+# not written here and is not this mechanism's to remove.
 journal_ours() {
 	[ -d "$1" ] || return 1
 	[ -L "$1" ] && return 1
 	[ -f "$1/origin" ] || return 1
 	[ -L "$1/origin" ] && return 1
-	[ "$(find "$1" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" = 1 ] || return 1
+	case "$(find "$1" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" in
+		1 ) ;;
+		2 ) { [ -f "$1/moved" ] && [ ! -L "$1/moved" ]; } || return 1 ;;
+		* ) return 1 ;;
+	esac
 	same_repo "$(cat "$1/origin" 2>/dev/null)" "$URL"
 }
 
-# Closes a journal journal_ours vouched for, without recursion: only the file
-# the transaction wrote is removed, so anything unexpected that appeared
-# since keeps the rmdir from destroying it.
+# Closes a journal journal_ours vouched for, without recursion: only the
+# files the transaction wrote are removed, so anything unexpected that
+# appeared since keeps the rmdir from destroying it.
 close_journal() {
-	rm -f -- "$1/origin" 2>/dev/null
+	rm -f -- "$1/origin" "$1/moved" 2>/dev/null
 	rmdir -- "$1" 2>/dev/null || echo "Warning: could not close the journal $1" >&2
 }
 
@@ -475,7 +533,7 @@ replace_repo() {
 		# name, and nothing inside the moved tree counts as proof - repo
 		# content is not this mechanism's writing. Everything else is
 		# refused and named so a human can move it away.
-		if journal_ours "$JOURNAL" \
+		if journal_ours "$JOURNAL" && [ -f "$JOURNAL/moved" ] \
 			&& { check_stored_identity "$TRASH" 2>/dev/null \
 				|| check_stored_identity "$TRASH/.git" 2>/dev/null; }; then
 			echo "Warning: clearing $TRASH left behind by an earlier repair"
@@ -508,6 +566,11 @@ replace_repo() {
 		close_journal "$JOURNAL"
 		return $RC_DAMAGE
 	fi
+	# The rename is on record from this moment: only a journal that says
+	# 'moved' may ever vouch for what sits at the trash name. Best effort -
+	# if this write dies, the pair is refused later and a human unties it,
+	# which errs on the safe side.
+	: > "$JOURNAL/moved" 2>/dev/null || true
 	REPL_RC=0; "$2" "$1" || REPL_RC=$?
 	if [ "$REPL_RC" -eq 0 ]; then
 		chmod -R -- u+rwX "$TRASH" 2>/dev/null || true
@@ -592,26 +655,43 @@ ensure_ref_repo() {
 			return $RC_INVALID
 		fi
 		# Section and variable names are case-insensitive to git, the
-		# subsection name is not.
+		# subsection name is not. Read with xtrace off, like every other
+		# url taken from disk: the trace would print it unredacted. A url
+		# that disagrees means the store belongs to someone else and must
+		# not be rebound; nothing readable at all is a different thing -
+		# there is no identity to protect, only a dir to repair. A salvaged
+		# match is still an identification - only the file around the url
+		# is broken - so it earns what a readable match earns.
+		SLV_XT=; case $- in *x*) SLV_XT=1; set +x ;; esac
 		SALVAGED=$(awk '
 			/^[[:space:]]*\[/ { in_origin = ($0 ~ /^[[:space:]]*\[[Rr][Ee][Mm][Oo][Tt][Ee][[:space:]]+"origin"\]/) }
 			in_origin && /^[[:space:]]*[Uu][Rr][Ll][[:space:]]*=/ {
 				sub(/^[[:space:]]*[Uu][Rr][Ll][[:space:]]*=[[:space:]]*/, ""); print; exit
 			}' "$1/config")
-		# A url that disagrees means the store belongs to someone else and
-		# must not be rebound. Nothing readable at all is a different thing:
-		# there is no identity to protect, only a dir to repair. A salvaged
-		# match is still an identification - only the file around the url
-		# is broken - so it earns what a readable match earns.
+		SLV_ACT=ok
 		if [ "$SALVAGED" ]; then
 			if [ -z "$URL" ]; then
-				URL=$SALVAGED
+				if url_has_userinfo "$SALVAGED"; then
+					SLV_ACT=creds
+				else
+					URL=$SALVAGED
+					REF_IDENTIFIED="salvaged"
+				fi
 			elif ! same_repo "$SALVAGED" "$URL"; then
-				echo "Error: $1 has an unreadable config; its origin reads '$(shown "$SALVAGED")', not '$(shown "$URL")'" >&2
-				return $RC_INVALID
+				SLV_ACT=mismatch
+			else
+				REF_IDENTIFIED="salvaged"
 			fi
-			REF_IDENTIFIED="salvaged"
 		fi
+		[ "$SLV_XT" ] && set -x
+		case "$SLV_ACT" in
+			creds )
+				echo "Error: the salvaged origin of $1 carries credentials; refusing to adopt it" >&2
+				return $RC_INVALID ;;
+			mismatch )
+				echo "Error: $1 has an unreadable config; its origin reads '$(shown "$SALVAGED")', not '$(shown "$URL")'" >&2
+				return $RC_INVALID ;;
+		esac
 		echo "Warning: $1 has an unreadable config, moving it aside" >&2
 		mv -- "$1/config" "$1/config.broken" || return $RC_DAMAGE
 	fi
@@ -871,6 +951,25 @@ clean() {
 	return $RC_DAMAGE
 }
 
+# The one classifier for what a resolved ref names. Prints the commit it
+# peels to. A ref that exists but ends at a blob or a tree is the caller's
+# mistake - no repair makes it checkoutable, and the ladder would spend a
+# working tree learning so. A chain that cannot be walked - an annotated tag
+# whose referent is gone - is damage a refetch may heal. cat-file on the ref
+# would conflate the two: it proves only that the outermost object reads.
+peel_commit() {
+	PC=$(git -C "$1" rev-parse --verify --quiet "$2^{commit}")
+	if [ -z "$PC" ]; then
+		if git -C "$1" rev-parse --verify --quiet "$2^{}" >/dev/null 2>&1; then
+			echo "Error: target ref does not point to a commit: $3" >&2
+			return $RC_INVALID
+		fi
+		echo "Warning: $1 cannot read the object behind $2" >&2
+		return $RC_DAMAGE
+	fi
+	printf '%s\n' "$PC"
+}
+
 # A full ref keeps its type end to end: refs/tags/x and refs/heads/x are
 # different things that share a name, and guessing between them once built a
 # branch for a tag workflow. A bare name is still accepted for callers who
@@ -917,39 +1016,25 @@ resolve_ref() {
 # files modified, and this action promises the requested ref. --force keeps
 # untracked content that is not in the way, which is what makes clean:false
 # worth having; wiping the rest is clean's job.
+# dir refname resolved commit. Resolution and classification happened in
+# target_steps moments ago, with no fetch in between, and the commit id -
+# not the mutable name - is what gets materialized: what was judged is what
+# is checked out, literally. The branch case still creates the local branch
+# the caller expects, pinned at the judged commit.
 checkout() {
-	RESOLVED=$(resolve_ref "$1" "$2") || return $?
-	# A ref can exist and still not name a commit - a tag on a blob or a
-	# tree. That is the caller's mistake, not damage: no repair makes it
-	# checkoutable, and the ladder would spend a working tree learning so.
-	# An object that cannot be read at all is damage - a refetch may heal.
-	WANT=$(git -C "$1" rev-parse --verify --quiet "$RESOLVED^{commit}")
-	if [ -z "$WANT" ]; then
-		# ^{} peels the whole chain: reaching a final object that is not a
-		# commit is the caller's mistake, while a chain that cannot be
-		# walked - an annotated tag whose referent is gone - is damage a
-		# refetch may heal. cat-file on the ref would conflate the two: it
-		# proves only that the outermost object reads.
-		if git -C "$1" rev-parse --verify --quiet "$RESOLVED^{}" >/dev/null 2>&1; then
-			echo "Error: target ref does not point to a commit: $2" >&2
-			return $RC_INVALID
-		fi
-		echo "Warning: $1 cannot read the object behind $RESOLVED" >&2
-		return $RC_DAMAGE
-	fi
-	case "$RESOLVED" in
+	case "$3" in
 		refs/remotes/origin/* )
-			BRANCH=${RESOLVED#refs/remotes/origin/}
-			git -C "$1" checkout --force -B "$BRANCH" "$RESOLVED" || return $RC_DAMAGE ;;
+			BRANCH=${3#refs/remotes/origin/}
+			git -C "$1" checkout --force -B "$BRANCH" "$4" || return $RC_DAMAGE ;;
 		* )
-			git -C "$1" checkout --force "$RESOLVED" || return $RC_DAMAGE ;;
+			git -C "$1" checkout --force "$4" || return $RC_DAMAGE ;;
 	esac
 	# A checkout that returns zero has still gone wrong if HEAD is not what
 	# was asked for: a refspec lost along the way leaves the remote ref
 	# behind, and the build would quietly be of an older commit.
 	HAVE=$(git -C "$1" rev-parse HEAD) || return $RC_DAMAGE
-	[ "$WANT" = "$HAVE" ] && return 0
-	echo "Error: HEAD is $HAVE, expected $WANT for $2" >&2
+	[ "$4" = "$HAVE" ] && return 0
+	echo "Error: HEAD is $HAVE, expected $4 for $2" >&2
 	return $RC_DAMAGE
 }
 
@@ -1015,19 +1100,17 @@ target_steps() {
 	# for every run it closes the window where the remote changed between
 	# the store fetch and this one. From here to the checkout there is no
 	# further fetch, so what this resolves is what gets checked out.
+	STEP_REF=
+	STEP_WANT=
 	if [ "$TARGET_REF" ]; then
 		STEP_REF=$(resolve_ref "$1" "$TARGET_REF") || return $?
-		if ! git -C "$1" rev-parse --verify --quiet "$STEP_REF^{commit}" >/dev/null 2>&1 \
-			&& git -C "$1" rev-parse --verify --quiet "$STEP_REF^{}" >/dev/null 2>&1; then
-			echo "Error: target ref does not point to a commit: $TARGET_REF" >&2
-			return $RC_INVALID
-		fi
+		STEP_WANT=$(peel_commit "$1" "$STEP_REF" "$TARGET_REF") || return $?
 	fi
 	if [ "$CLEAN" ]; then
 		clean "$1" || return $?
 	fi
 	if [ "$TARGET_REF" ]; then
-		checkout "$1" "$TARGET_REF" || return $?
+		checkout "$1" "$TARGET_REF" "$STEP_REF" "$STEP_WANT" || return $?
 		# A sparse checkout with nothing currently excluded leaves no trace
 		# before the fetch, and only marks paths the new commit adds. The
 		# invariant is that a finished target holds none of them at all.
@@ -1099,16 +1182,10 @@ done
 # Credentials belong in the token input: a url is logged by the debug trace,
 # stored in every repo config and printed in diagnostics. Only the authority
 # is inspected - an '@' later in the path is somebody's legitimate name.
-case "$URL" in
-	https://* )
-		AUTHORITY=${URL#https://}
-		AUTHORITY=${AUTHORITY%%/*}
-		case "$AUTHORITY" in
-			*@* )
-				echo "Error: credentials in the repository url are not supported - pass a token instead" >&2
-				exit $RC_INVALID ;;
-		esac ;;
-esac
+if url_has_userinfo "$URL"; then
+	echo "Error: credentials in the repository url are not supported - pass a token instead" >&2
+	exit $RC_INVALID
+fi
 
 [ "$DEBUG_TRACE" ] && set -x
 
@@ -1146,36 +1223,19 @@ fi
 # the store just fetched the same refspecs, so a name it cannot resolve does
 # not exist upstream, and a ref that peels to a non-commit never will - while
 # learning either after a repair or a clean would mean the invalid invocation
-# had already cost something. A bare object id gets its documented exception
-# proven rather than assumed by its spelling: absent from the store, it must
-# resolve read-only in the target - a commit may live there alone - or the
-# invocation is refused before anything is repaired or cleaned. An object the
-# store cannot read is not judged: that is damage, the target ladder's to
-# walk.
+# had already cost something. Bare object ids answer to the same rule: the
+# store keeps every object it ever fetched, so anything upstream ever served
+# still resolves. A commit created only inside the target is not addressable
+# when a store is in play - a target may need the very repair that would
+# delete the object's sole copy, and metadata no layout check has judged yet
+# must not authorize anything. (Without a store, the judgement inside
+# target_steps still accepts a target-local id.) An object the store cannot
+# read is not judged early: that is damage, the target ladder's to walk.
 if [ "$TARGET_REF" ] && [ "$REF_DIR" ]; then
-	EARLY=$(resolve_ref "$REF_DIR" "$TARGET_REF" 2>/dev/null) || EARLY=
-	if [ "$EARLY" ]; then
-		if ! git -C "$REF_DIR" rev-parse --verify --quiet "$EARLY^{commit}" >/dev/null 2>&1 \
-			&& git -C "$REF_DIR" rev-parse --verify --quiet "$EARLY^{}" >/dev/null 2>&1; then
-			echo "Error: target ref does not point to a commit: $TARGET_REF" >&2
-			exit $RC_INVALID
-		fi
-	else
-		case "$TARGET_REF" in
-			*[!0-9a-fA-F]* )
-				echo "Error: target ref does not exist: $TARGET_REF" >&2
-				exit $RC_INVALID ;;
-			* )
-				EARLY_HEX=$(printf '%s' "$TARGET_REF" | tr 'A-F' 'a-f')
-				EARLY=$(git -C "$TARGET_DIR" rev-parse --verify --quiet "$EARLY_HEX^{commit}" 2>/dev/null)
-				case "$EARLY" in
-					"$EARLY_HEX"* ) ;;
-					* )
-						echo "Error: target ref does not exist: $TARGET_REF" >&2
-						exit $RC_INVALID ;;
-				esac ;;
-		esac
-	fi
+	EARLY=$(resolve_ref "$REF_DIR" "$TARGET_REF") || exit $?
+	EARLY_RC=0
+	peel_commit "$REF_DIR" "$EARLY" "$TARGET_REF" >/dev/null || EARLY_RC=$?
+	[ "$EARLY_RC" -eq "$RC_INVALID" ] && exit $EARLY_RC
 fi
 
 # A target that is not a usable repo is rebuilt before anything else; only

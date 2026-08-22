@@ -370,12 +370,16 @@ rc_is "a commit id in upper case" 0
 is  "  lands on that commit" "$SHA_MAIN" "$(git -C "$W/srcU" rev-parse HEAD)"
 
 # --- a commit that lives in the target alone ------------------------------
+# With a store in play it is refused: the target may need the very repair
+# that would delete the object's sole copy, so the id must exist upstream.
 git -C "$W/srcU" checkout -q --detach
 git -C "$W/srcU" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local-only
 SHA_LOCAL=$(git -C "$W/srcU" rev-parse HEAD)
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcU --target-ref "$SHA_LOCAL"
-rc_is "a commit id only the target holds still works" 0
-is  "  and lands on it" "$SHA_LOCAL" "$(git -C "$W/srcU" rev-parse HEAD)"
+rc_is "a target-only commit id is refused when a store speaks for upstream" 2
+has "  and says so" "does not exist"
+git -C "$W/srcU" cat-file -e "$SHA_LOCAL" 2>/dev/null \
+    && ok "  its only copy is untouched" || bad "  its only copy is untouched"
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcU --target-ref main
 rc_is "prep: back on a branch" 0
 
@@ -754,8 +758,15 @@ if [ "$HAVE_PERM" ]; then
 	[ "$RC" != 0 ] && ok "a same-origin backup at the name is not a leftover" || bad "a same-origin backup at the name is not a leftover (rc=$RC)"
 	has "  identity alone does not clear it" "not an earlier repair's leftover"
 	[ -d "$W/srcP.gone/.git" ] && ok "  the backup survives, in-tree marker files and all" || bad "  the backup survives, in-tree marker files and all"
-	# The pair a crash after the rename leaves behind: journal plus trash.
+	# A journal opened by a transaction that never renamed anything - no
+	# 'moved' flag - must not vouch for a backup parked at the trash name.
 	mkdir -p "$W/srcP.gone-journal"; printf '%s\n' "$T/origin.git" > "$W/srcP.gone-journal/origin"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main --clean
+	[ "$RC" != 0 ] && ok "a journal that never moved anything clears nothing" || bad "a journal that never moved anything clears nothing (rc=$RC)"
+	[ -d "$W/srcP.gone/.git" ] && ok "  the backup still survives" || bad "  the backup still survives"
+	# The pair a crash after the rename leaves behind: journal with the
+	# moved flag, plus trash.
+	: > "$W/srcP.gone-journal/moved"
 	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcP --target-ref main --clean
 	rc_is "a journaled leftover is collected" 0
 	has "  with the clearing announced" "left behind by an earlier repair"
@@ -1056,6 +1067,30 @@ echo KEEPME > "$W/srcJ2/untracked-probe"
 RUN "$W" --repo "$T/origin.git" --target-dir srcJ2 --target-ref no-such-ref --clean
 rc_is "an unknown ref without a store is judged before clean" 2
 is  "  and untracked content survives" KEEPME "$(cat "$W/srcJ2/untracked-probe" 2>/dev/null)"
+
+# Without a store, a commit only the target holds is still addressable.
+git -C "$W/srcJ2" checkout -q --detach
+git -C "$W/srcJ2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local-only
+SHA_LOCAL2=$(git -C "$W/srcJ2" rev-parse HEAD)
+RUN "$W" --repo "$T/origin.git" --target-dir srcJ2 --target-ref "$SHA_LOCAL2"
+rc_is "a target-only commit id still works without a store" 0
+is  "  and lands on it" "$SHA_LOCAL2" "$(git -C "$W/srcJ2" rev-parse HEAD)"
+
+# --- credentials hiding in stored configs never reach the log -------------
+rm -rf "$W/refS.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refS.git; rc_is "prep: a store to poison" 0
+git -C "$W/refS.git" config remote.origin.url "https://u:STOREDSECRET@127.0.0.1/x.git"
+OUT=$(cd "$W" && GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" --debug --repo "$T/origin.git" --ref-dir refS.git 2>&1); RC=$?
+[ "$RC" != 0 ] && ok "a store whose stored origin differs is refused" || bad "a store whose stored origin differs is refused (rc=$RC)"
+hasnt "  and its secret never appears, xtrace included" "STOREDSECRET"
+OUT=$(cd "$W" && GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" --debug --ref-dir refS.git 2>&1); RC=$?
+[ "$RC" != 0 ] && ok "adopting a credential-bearing origin is refused" || bad "adopting a credential-bearing origin is refused (rc=$RC)"
+has "  with a generic message" "carries credentials"
+hasnt "  never the value" "STOREDSECRET"
+git -C "$W/src" config remote.origin.url "https://u:STOREDSECRET@127.0.0.1/x.git"
+OUT=$(cd "$W" && "$SH" "$SCRIPT" --debug "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a poisoned target origin is rebuilt as usual" 0
+hasnt "  without the secret reaching the log" "STOREDSECRET"
 
 # --- an unowned journal is never removed -----------------------------------
 rm -rf "$W/refJ.git" "$W/refJ.git.gone-journal"
