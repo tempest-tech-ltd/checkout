@@ -117,8 +117,8 @@ same_repo() {
 }
 
 # A filesystem root - /, //, a drive, a UNC server or share root - or nothing
-# at all. The one list every path guard below shares: the two copies it
-# replaced had already drifted apart once.
+# at all. The one list both path guards (prepare_dir, deletable_dir) share:
+# the two copies it replaced had already drifted apart once.
 is_fs_root() {
 	case "$1" in
 		"" | / | // | ?:[/\\] | ?:[/\\][/\\] ) return 0 ;;
@@ -132,8 +132,8 @@ is_fs_root() {
 # a path that does not exist yet cannot be resolved, and means something else
 # once the dirs above it appear - 'base/keep/new/..' becomes 'base/keep', a
 # directory that belongs to someone else and is about to be git init'd and
-# cleaned. Such a path is refused; an existing one is resolved and checked for
-# being a filesystem root. Absolute paths outside the workspace stay allowed:
+# cleaned. Such a path is refused; a filesystem root is refused both as
+# written and as resolved. Absolute paths outside the workspace stay allowed:
 # on Windows the default workspace is too deep for a chromium checkout, so
 # ours live elsewhere. Prints the canonical path.
 prepare_dir() {
