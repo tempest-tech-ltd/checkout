@@ -8,6 +8,16 @@
 # does not exist - gets refused. Conflating them once let a stale build pass
 # for a good one, and let one job rebind the cache every other job reads.
 #
+# Repair escalates the way a human would: in place first, then a rebuild that
+# keeps what is expensive, then deleting the repo and cloning from nothing.
+# The last rung is earned, not defaulted to: only damage diagnosed in the
+# repo itself climbs there, only for a repo whose identity was positively
+# established, and only with the remote answering a probe. A fetch that
+# merely kept failing is none of that - it gets a code of its own and never
+# deletes anything, because at chromium scale a dying pack transfer is
+# routine and deleting cannot fix it. Every rung is tried once; an invalid
+# invocation stops the climb wherever it shows.
+#
 # Functions never exit; they return one of the codes below and leave the
 # decision to the dispatcher at the bottom. set -e is deliberately not used:
 # it does not apply inside a function called from an AND-OR list, which is
@@ -34,10 +44,11 @@ export GIT_NO_REPLACE_OBJECTS
 
 RC_DAMAGE=1     # local metadata are broken - repairable
 RC_INVALID=2    # the caller asked for something impossible - not repairable
+RC_FETCH=3      # the fetch kept failing - nothing local left to repair
 
 usage() {
 	echo Usage: `basename $0` "[--repo REPO_URL] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
-	echo "Exit: 0 ok, $RC_DAMAGE unfinished - damage a repair did not fix, or a fetch that kept failing, $RC_INVALID invalid invocation"
+	echo "Exit: 0 ok, $RC_DAMAGE unfinished - damage a repair did not fix, $RC_INVALID invalid invocation, $RC_FETCH a fetch that kept failing"
 	exit $RC_INVALID
 }
 
@@ -126,6 +137,21 @@ check_disjoint() {
 	case "$2" in "$1"/* ) echo "Error: target dir '$2' is inside reference dir '$1'" >&2; return $RC_INVALID ;; esac
 	case "$1" in "$2"/* ) echo "Error: reference dir '$1' is inside target dir '$2'" >&2; return $RC_INVALID ;; esac
 	return 0
+}
+
+# The path a repair is about to delete, resolved fresh at that moment rather
+# than trusted from earlier in the run: '/tmp/..' and a symlink to / both name
+# the root while looking harmless. Prints the resolved path; fails on anything
+# that resolves to a filesystem root - a drive, a UNC server or share root -
+# or to nothing at all.
+deletable_dir() {
+	DEL=$(abs_path "$1")
+	case "$DEL" in
+		"" | / | // | ?:[/\\] | ?:[/\\][/\\] ) return 1 ;;
+		//*/*/* ) ;;
+		//* ) return 1 ;;
+	esac
+	printf '%s\n' "$DEL"
 }
 
 # The two dirs are checked apart: only a work tree can be checked out, and
@@ -250,6 +276,24 @@ drop_token() {
 	unset GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
 }
 
+# The credential goes to the command that needs it through the environment -
+# not into a config file, which the reference dir would keep for every later
+# step, and not into argv, which is readable from any process listing. xtrace
+# is off around the token and its encoding, which a runner is not obliged to
+# mask. drop_token puts the environment back.
+grant_token() {
+	XTRACE=
+	case $- in *x*) XTRACE=1; set +x ;; esac
+	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
+		GIT_CONFIG_COUNT=3
+		GIT_CONFIG_KEY_2=http.extraHeader
+		GIT_CONFIG_VALUE_2="Authorization: basic $(printf '%s' "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')"
+		export GIT_CONFIG_COUNT GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
+	fi
+	[ "$XTRACE" ] && set -x
+	return 0
+}
+
 # Tags come through a refspec of their own rather than --tags: git only prunes
 # tags it fetched by refspec, and --prune-tags is ignored outright once
 # refspecs are given on the command line - a tag deleted upstream would live on
@@ -259,11 +303,6 @@ drop_token() {
 # be steered by configuration this script does not own: a negative refspec or
 # a second url reaching the repo through include.path would otherwise decide
 # what gets fetched, and a checkout of an old commit would look like success.
-#
-# The credential goes to this one command through the environment - not into a
-# config file, which the reference dir would keep for every later step, and not
-# into argv, which is readable from any process listing. xtrace is off around
-# the token and its encoding, which a runner is not obliged to mask.
 fetch_repo() {
 	DIR=$1; shift
 	# git rewrites the url it is handed through url.<base>.insteadOf, so the
@@ -278,17 +317,9 @@ fetch_repo() {
 		echo "Error: git config rewrites '$URL' to '$EFFECTIVE' - remove the url.*.insteadOf entry" >&2
 		return $RC_INVALID
 	fi
-	XTRACE=
-	case $- in *x*) XTRACE=1; set +x ;; esac
-	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
-		GIT_CONFIG_COUNT=3
-		GIT_CONFIG_KEY_2=http.extraHeader
-		GIT_CONFIG_VALUE_2="Authorization: basic $(printf '%s' "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')"
-		export GIT_CONFIG_COUNT GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
-	fi
+	grant_token
 	# Anything an older version of this script persisted.
 	git -C "$DIR" config --unset-all http.extraHeader 2>/dev/null || true
-	[ "$XTRACE" ] && set -x
 
 	retries=${GIT_FETCH_RETRIES:-5}
 	delay=${GIT_FETCH_DELAY:-2}
@@ -301,12 +332,59 @@ fetch_repo() {
 		retries=$((retries - 1))
 		if [ "$retries" -le 0 ]; then
 			drop_token
-			return $RC_DAMAGE
+			return $RC_FETCH
 		fi
 		echo "Git command failed. Retrying in ${delay}s..."
 		sleep $delay
 		delay=$((delay * 2))
 	done
+}
+
+# Whether the remote answers at all - the last check before a repair deletes
+# a repo, because deleting is pointless at the exact moment nothing can be
+# fetched back. Asked from the same directory the fetch runs in, so a
+# relative url resolves to the same place and a url rewrite is seen by the
+# same config - a probe answered by a different remote than the fetch's is
+# no evidence. The rewrite check runs before the token is granted, so the
+# credential is never sent to a host a rewrite chose.
+probe_remote() {
+	PROBE_EFFECTIVE=$(git -C "$1" ls-remote --get-url "$URL" 2>/dev/null) || return 1
+	same_repo "$PROBE_EFFECTIVE" "$URL" || return 1
+	grant_token
+	git -C "$1" ls-remote "$URL" HEAD >/dev/null 2>&1
+	PROBE_RC=$?
+	drop_token
+	return $PROBE_RC
+}
+
+# Deletion by rename first: mv of a directory is atomic where rm -rf is not.
+# An open handle - normal on git-bash - fails the whole rename and the repo
+# stays untouched, instead of failing halfway through a delete. The clone
+# then goes to the original path, the old content is removed only after the
+# clone succeeded, and a failed clone puts the old content back.
+replace_repo() {
+	TRASH=$1.gone
+	case "$TRASH" in
+		"$REF_DIR" | "$TARGET_DIR" )
+			echo "Error: $TRASH is a directory this run works on" >&2
+			return $RC_DAMAGE ;;
+	esac
+	if [ -e "$TRASH" ]; then
+		chmod -R -- u+rwX "$TRASH" 2>/dev/null || true
+		rm -rf -- "$TRASH" 2>/dev/null
+	fi
+	[ -e "$TRASH" ] && { echo "Error: cannot clear $TRASH" >&2; return $RC_DAMAGE; }
+	mv -- "$1" "$TRASH" || { echo "Error: cannot move $1 aside" >&2; return $RC_DAMAGE; }
+	RC=0; "$2" "$1" || RC=$?
+	if [ "$RC" -eq 0 ]; then
+		chmod -R -- u+rwX "$TRASH" 2>/dev/null || true
+		rm -rf -- "$TRASH" 2>/dev/null || true
+		[ -e "$TRASH" ] && echo "Warning: the old content is left at $TRASH" >&2
+		return 0
+	fi
+	rm -rf -- "$1" 2>/dev/null
+	mv -- "$TRASH" "$1" || echo "Error: the old content is stranded at $TRASH" >&2
+	return $RC
 }
 
 # Locks left by a killed git; every later write fails on them. The runner
@@ -332,8 +410,9 @@ create_ref_repo() {
 }
 
 # 'git init --bare' over a damaged bare repo leaves its objects alone, so the
-# repair is the create path minus the destruction. The store is never
-# deleted: every target borrowing from it would lose its objects.
+# repair is the create path minus the destruction. Deleting the store is kept
+# for the last rung at the bottom: every target borrowing from it loses
+# objects then, and buys them back through a rebuild of its own.
 ensure_ref_repo() {
 	[ -z "$REF_EXISTED" ] && { create_ref_repo "$1"; return $?; }
 	# A worktree is not a reference repo: alternates would name a directory
@@ -342,9 +421,12 @@ ensure_ref_repo() {
 		echo "Error: $1 is a work tree, not a bare repository" >&2
 		return $RC_INVALID
 	fi
-	# Identity first, so a repo too damaged to open cannot be rebound.
+	# Identity first, so a repo too damaged to open cannot be rebound. A
+	# match is also what later earns the right to delete: a dir that never
+	# showed an origin of this repository may hold anything at all.
 	RC=0; check_stored_identity "$1" || RC=$?
 	[ "$RC" -eq "$RC_INVALID" ] && return $RC
+	[ "$RC" -eq 0 ] && REF_IDENTIFIED="matched"
 	# A config git cannot parse kills every command including the init that
 	# would repair it. Salvage origin's url by hand to keep the no-rebind
 	# guarantee, then move the file aside so the repair can run at all.
@@ -394,7 +476,41 @@ ensure_ref_repo() {
 	else
 		echo "Warning: $1 is not a valid bare git repo, reinitializing it in place (existing objects are kept)"
 	fi
-	create_ref_repo "$1"
+	RC=0; create_ref_repo "$1" || RC=$?
+	case "$RC" in
+		0 | "$RC_INVALID" ) return $RC ;;
+	esac
+	# The rung after the in-place repair - reached with the store's own
+	# structure refusing the reinit (RC_DAMAGE), or with the fetch still
+	# failing over a store that reinit found sound (RC_FETCH). The second
+	# says nothing about the objects by itself: at this scale a dying pack
+	# transfer is routine, and deleting cannot fix a transfer. Only fsck
+	# implicating the objects - one pack a killed fetch left truncated fails
+	# every fetch after it - turns that into damage worth the delete.
+	if [ "$RC" -eq "$RC_FETCH" ]; then
+		git -C "$1" fsck --connectivity-only >/dev/null 2>&1 && return $RC
+		echo "Warning: $1 fails fsck - its objects are implicated" >&2
+	fi
+	# Deleting is earned by identity, not by damage: without an origin that
+	# matched, this dir was never shown to be a store of $URL at all.
+	if [ -z "$REF_IDENTIFIED" ]; then
+		echo "Warning: not deleting $1 - it was never identified as a store of $URL" >&2
+		return $RC
+	fi
+	STORE_ABS=$(deletable_dir "$1") || {
+		echo "Error: refusing to delete unsafe reference dir: '$1'" >&2
+		return $RC_INVALID
+	}
+	# The last check: a remote that stopped answering is the one problem
+	# deleting can never fix, so the store is kept for when it returns. Every
+	# target borrowing objects the new store no longer holds is repaired by
+	# its own ladder, which also ends in a clone.
+	if ! probe_remote "$STORE_ABS"; then
+		echo "Error: $URL is not answering; keeping $1 rather than deleting what could not be recloned" >&2
+		return $RC
+	fi
+	echo "Warning: the repair was not enough, deleting the store $1 and recloning it from scratch"
+	replace_repo "$STORE_ABS" create_ref_repo
 }
 
 # --- target dir -----------------------------------------------------------
@@ -411,36 +527,38 @@ create_target_repo() {
 	fetch_repo "$1" fetch --prune --force
 }
 
+# Linked work trees keep their administrative files under this .git and
+# nowhere else: deleting it leaves each of them with 'not a git repository'.
+# They are not this run's to rebuild, so the repairs below stop instead.
+# Only through a .git of the target's own: a symlink would find the
+# registrations of the checkout it points at, and unlinking harms none of
+# them. An entry whose gitdir names nothing that exists describes a work
+# tree that is already gone - git keeps the entry, and a --clean that
+# removed a work tree living inside the target leaves one - so there is
+# nothing there to protect.
+has_live_linked_worktrees() {
+	[ -d "$1/.git" ] && [ ! -L "$1/.git" ] || return 1
+	for WT in "$1"/.git/worktrees/*/; do
+		[ -f "${WT}gitdir" ] || continue
+		LINKED=$(cat -- "${WT}gitdir" 2>/dev/null)
+		[ -n "$LINKED" ] && [ -e "$LINKED" ] || continue
+		return 0
+	done
+	return 1
+}
+
 # Recreates .git and refetches, keeping the working tree: its untracked
 # content is worth hours on a chromium-sized checkout, and the forced
 # checkout reconciles every tracked path anyway. Runs once per invocation.
 recover_target_repo() {
 	[ "$RECOVERED" ] && return $RC_DAMAGE
-	# Resolve before deleting: '/tmp/..' and a symlink to / both name the
-	# root while looking harmless.
-	TARGET_ABS=$(abs_path "$1")
-	case "$TARGET_ABS" in
-		"" | / | ?:[/\\] )
-			echo "Error: refusing to recover unsafe target dir: '$1'" >&2
-			return $RC_INVALID ;;
-	esac
-	# Linked work trees keep their administrative files under this .git and
-	# nowhere else: deleting it leaves each of them with 'not a git
-	# repository'. They are not this run's to rebuild, so it stops instead.
-	# Only through a .git of the target's own: a symlink would find the
-	# registrations of the checkout it points at, and unlinking harms none
-	# of them. An entry whose gitdir names nothing that exists describes a
-	# work tree that is already gone - git keeps the entry, and a --clean
-	# that removed a work tree living inside the target leaves one - so
-	# there is nothing there to protect.
-	if [ -d "$TARGET_ABS/.git" ] && [ ! -L "$TARGET_ABS/.git" ]; then
-		for WT in "$TARGET_ABS"/.git/worktrees/*/; do
-			[ -f "${WT}gitdir" ] || continue
-			LINKED=$(cat -- "${WT}gitdir" 2>/dev/null)
-			[ -n "$LINKED" ] && [ -e "$LINKED" ] || continue
-			echo "Error: $1 has linked work trees registered; recreating its .git would break them" >&2
-			return $RC_INVALID
-		done
+	TARGET_ABS=$(deletable_dir "$1") || {
+		echo "Error: refusing to recover unsafe target dir: '$1'" >&2
+		return $RC_INVALID
+	}
+	if has_live_linked_worktrees "$TARGET_ABS"; then
+		echo "Error: $1 has linked work trees registered; recreating its .git would break them" >&2
+		return $RC_INVALID
 	fi
 	# Without a ref nothing reconciles the working tree afterwards: the files
 	# would be left untracked beside a new .git, and a clean would then throw
@@ -453,6 +571,54 @@ recover_target_repo() {
 	echo "Warning: recovering $1 - reinitializing its .git (working tree files are kept and reconciled by the checkout)"
 	rm -rf -- "$TARGET_ABS/.git" || return $RC_DAMAGE
 	create_target_repo "$1"
+}
+
+# The last rung of target repair, and what a human does when rebuilding .git
+# was not enough: delete the checkout and clone from nothing. The suspects
+# left by then live in the working tree, where debris git itself cannot
+# delete fails a clean the same way on every retry - so this time the tree
+# goes too, read-only debris being the usual way one becomes undeletable.
+# The reference dir is never inside the target - see check_disjoint - so the
+# store survives this. Deleting is earned by identity: only a dir that came
+# into this run as this repository's checkout, or that this run created, is
+# this run's to delete - anything else may hold content that was never the
+# action's. The gates the rebuild has are re-checked (the ladder ran them
+# already; here they guard the delete itself), and one is new: the remote
+# has to answer, since a working tree must not be spent on an outage that
+# deleting cannot fix.
+nuke_target_repo() {
+	if [ -z "$TARGET_TRUSTED" ]; then
+		echo "Warning: not deleting $1 - it was never identified as a checkout of $URL" >&2
+		return $RC_DAMAGE
+	fi
+	TARGET_ABS=$(deletable_dir "$1") || {
+		echo "Error: refusing to delete unsafe target dir: '$1'" >&2
+		return $RC_INVALID
+	}
+	if has_live_linked_worktrees "$TARGET_ABS"; then
+		echo "Error: $1 has linked work trees registered; deleting it would break them" >&2
+		return $RC_INVALID
+	fi
+	if [ -z "$TARGET_REF" ]; then
+		echo "Error: $1 needs a full rebuild, which requires --target-ref to put a working tree back" >&2
+		return $RC_INVALID
+	fi
+	# What the reclone needs, checked before anything is touched: finding
+	# out after the delete would leave nothing behind and nothing back.
+	if [ -z "$REF_DIR" ]; then
+		echo "Error: $1 cannot be recloned without a reference dir" >&2
+		return $RC_INVALID
+	fi
+	objects_dir "$REF_DIR" >/dev/null || {
+		echo "Error: the reference dir $REF_DIR is unusable; keeping $1" >&2
+		return $RC_DAMAGE
+	}
+	if ! probe_remote "$TARGET_ABS"; then
+		echo "Error: $URL is not answering; keeping $1 rather than deleting what could not be recloned" >&2
+		return $RC_DAMAGE
+	fi
+	echo "Warning: repairs were not enough, deleting the checkout $1 and cloning it from scratch"
+	replace_repo "$TARGET_ABS" create_target_repo
 }
 
 # --- work-tree operations -------------------------------------------------
@@ -635,6 +801,8 @@ TARGET_DIR=
 TARGET_REF=
 CLEAN=
 RECOVERED=
+REF_IDENTIFIED=
+TARGET_TRUSTED=
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--repo)
@@ -707,14 +875,20 @@ fi
 [ -z "$TARGET_DIR" ] && exit 0
 
 # A target that is not a usable repo is rebuilt before anything else; only
-# then are the steps tried, and only a repairable failure earns one repair
-# and one retry. An invalid invocation stops here rather than being answered
-# by deleting metadata.
+# then are the steps tried. A repairable failure climbs a ladder: the steps
+# once more after a .git rebuild that keeps the working tree, once more after
+# the full reclone - each rung tried once. An invalid invocation stops the
+# climb wherever it shows, rather than being answered by deleting metadata;
+# a fetch that kept failing climbs no further than the rebuild, since the
+# reclone would only run the same fetch over a working tree it just deleted.
+RC=0
 if [ -z "$TARGET_EXISTED" ]; then
+	# A dir this run created holds nothing that is not this run's.
+	TARGET_TRUSTED="fresh"
 	create_target_repo "$TARGET_DIR" || exit $?
 elif ! is_repo "$TARGET_DIR" .git; then
 	echo "Warning: $TARGET_DIR is not a valid git repo"
-	recover_target_repo "$TARGET_DIR" || exit $?
+	recover_target_repo "$TARGET_DIR" || RC=$?
 else
 	# A check that reports damage earns a repair; one that reports an
 	# invalid invocation stops the run. The layout comes first: identity
@@ -722,10 +896,12 @@ else
 	# borrowing another checkout's metadata would be judged - and refused
 	# as someone else's repository - on that checkout's answers, when all
 	# it needs is its own .git.
-	RC=0
 	check_target_layout "$TARGET_DIR" || RC=$?
 	if [ "$RC" -eq 0 ]; then
 		check_identity "$TARGET_DIR" || RC=$?
+		# A matching origin on a sound layout is what later earns the
+		# delete rung; damage found after this point does not revoke it.
+		[ "$RC" -eq 0 ] && TARGET_TRUSTED="matched"
 		# A target naming another repository is damage, not a refusal: the
 		# no-rebind rule protects a store other checkouts borrow from, and
 		# a target lends nothing. All it costs is a working tree the
@@ -739,17 +915,34 @@ else
 	if [ "$RC" -eq "$RC_INVALID" ]; then
 		exit $RC
 	elif [ "$RC" -ne 0 ]; then
-		recover_target_repo "$TARGET_DIR" || exit $?
+		RC=0
+		recover_target_repo "$TARGET_DIR" || RC=$?
 	fi
 fi
+[ "$RC" -eq "$RC_INVALID" ] && exit $RC
 
-RC=0
-target_steps "$TARGET_DIR" || RC=$?
+# A rebuild that failed just above skips the steps: its .git is gone or its
+# fetch is failing, and either way the answer is the next rung or the exit,
+# not the steps.
+if [ "$RC" -eq 0 ]; then
+	target_steps "$TARGET_DIR" || RC=$?
+	# The rebuild rung takes damage and failing fetches alike - a fetch can
+	# be failing over broken refs, which a fresh .git repairs. Whether the
+	# rung is still available is decided here, not by the guard inside: a
+	# recover spent before the steps must not turn the code that got us
+	# here into something else.
+	if [ "$RC" -eq "$RC_DAMAGE" ] || [ "$RC" -eq "$RC_FETCH" ]; then
+		if [ -z "$RECOVERED" ]; then
+			RC=0
+			recover_target_repo "$TARGET_DIR" || RC=$?
+			[ "$RC" -eq 0 ] && { target_steps "$TARGET_DIR" || RC=$?; }
+		fi
+	fi
+fi
 if [ "$RC" -eq "$RC_DAMAGE" ]; then
-	recover_target_repo "$TARGET_DIR" || exit $?
+	nuke_target_repo "$TARGET_DIR" || exit $?
 	target_steps "$TARGET_DIR" || exit $?
-elif [ "$RC" -ne 0 ]; then
-	exit $RC
+	RC=0
 fi
 
-exit 0
+exit $RC

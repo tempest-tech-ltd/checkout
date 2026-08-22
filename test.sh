@@ -146,8 +146,12 @@ chmod +x "$T/fakebin/git"
 ln -sf "$(command -v git)" "$T/fakebin/git_real"
 git -C "$W/src" config --unset remote.origin.url
 touch "$T/nofetch"
-OUT=$(cd "$W" && PATH="$T/fakebin:$PATH" FAIL_FETCH=$T/nofetch "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
-[ "$RC" != 0 ] && ok "a recovery whose fetch fails reports failure" || bad "a recovery whose fetch fails reports failure (rc=$RC)"
+OBJ_REF=$(find "$W/ref.git/objects" -type f | wc -l)
+OUT=$(cd "$W" && PATH="$T/fakebin:$PATH" FAIL_FETCH=$T/nofetch GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a fetch that keeps failing stops the run" 3
+hasnt "  and deletes nothing" "from scratch"
+[ "$(find "$W/ref.git/objects" -type f | wc -l)" -ge "$OBJ_REF" ] \
+    && ok "  the store keeps its objects" || bad "  the store keeps its objects"
 rm -f "$T/nofetch"
 
 # --- damage that only shows up when git writes -------------------------
@@ -616,6 +620,133 @@ RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcN --clean
 [ "$RC" != 0 ] && ok "recovery without a target ref is refused" || bad "recovery without a target ref is refused (rc=$RC)"
 is  "  and the working tree is left alone" KEEPME "$(cat "$W/srcN/untracked-artifact" 2>/dev/null)"
 
+# --- the last rung: debris git itself cannot delete ----------------------
+# Where an unwritable directory does not block deletion - running as root,
+# or git-bash, whose chmod does not bite - the rung under test never fires.
+mkdir -p "$T/wprobe/d"; echo x > "$T/wprobe/d/f"; chmod a-w "$T/wprobe/d"
+if rm "$T/wprobe/d/f" 2>/dev/null; then HAVE_PERM=; else HAVE_PERM=1; fi
+chmod -R u+rwX "$T/wprobe" 2>/dev/null; rm -rf "$T/wprobe"
+if [ "$HAVE_PERM" ]; then
+	rm -rf "$W/srcZ"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcZ --target-ref main
+	rc_is "prep: a target to obstruct" 0
+	mkdir -p "$W/srcZ/debris"; echo junk > "$W/srcZ/debris/f"; chmod a-w "$W/srcZ/debris"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcZ --target-ref main --clean
+	rc_is "an unwritable directory a clean cannot remove" 0
+	has "  escalates to a full reclone" "deleting the checkout"
+	[ -e "$W/srcZ/debris" ] && bad "  which removes the debris" || ok "  which removes the debris"
+	is  "  and checks out the ref" ten "$(cat "$W/srcZ/a")"
+	is  "  the rebuild ran once" 1 "$(echo "$OUT" | grep -c "Warning: recovering")"
+	is  "  and the reclone ran once" 1 "$(echo "$OUT" | grep -c "from scratch")"
+	[ -e "$W/srcZ.gone" ] && bad "  leaving no trash behind" || ok "  leaving no trash behind"
+else
+	skip "an unwritable directory a clean cannot remove (deletion is not blocked here)"
+fi
+
+# --- a directory that was never a checkout is not the action's to delete --
+if [ "$HAVE_PERM" ]; then
+	rm -rf "$T/precious"; mkdir -p "$T/precious/debris"
+	echo PRECIOUS > "$T/precious/debris/f"; chmod a-w "$T/precious/debris"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir "$T/precious" --target-ref main --clean
+	[ "$RC" != 0 ] && ok "a data dir that cannot be cleaned fails" || bad "a data dir that cannot be cleaned fails (rc=$RC)"
+	has "  refusing the reclone for a dir that was never a checkout" "never identified"
+	is  "  and its content survives" PRECIOUS "$(cat "$T/precious/debris/f" 2>/dev/null)"
+	chmod -R u+rwX "$T/precious" 2>/dev/null; rm -rf "$T/precious"
+else
+	skip "a data dir that cannot be cleaned (deletion is not blocked here)"
+fi
+
+# --- the same for a reference dir that was never a store ------------------
+rm -rf "$T/preciousR"; mkdir -p "$T/preciousR"
+echo PRECIOUS > "$T/preciousR/artifact.bin"; echo junk > "$T/preciousR/objects"
+RUN "$W" --repo "$T/origin.git" --ref-dir "$T/preciousR"
+[ "$RC" != 0 ] && ok "a data dir that cannot become a store fails" || bad "a data dir that cannot become a store fails (rc=$RC)"
+has "  refusing the reclone for a dir that was never a store" "never identified"
+is  "  and its content survives" PRECIOUS "$(cat "$T/preciousR/artifact.bin" 2>/dev/null)"
+rm -rf "$T/preciousR"
+
+# --- the last rung never fires for a mistake ------------------------------
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref no-such-ref
+[ "$RC" != 0 ] && ok "an unknown ref still fails" || bad "an unknown ref still fails (rc=$RC)"
+hasnt "  without reaching the full reclone" "cloning from scratch"
+[ -d "$W/src/.git" ] && ok "  and the checkout is still there" || bad "  and the checkout is still there"
+
+# --- an outage: nothing is deleted while the remote is down ---------------
+rm -rf "$W/srcY" "$W/refY.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refY.git --target-dir srcY --target-ref main
+rc_is "prep: a checkout with a store of its own" 0
+echo KEEPME > "$W/srcY/untracked-artifact"
+rm -rf "$W/srcY/.git"
+mv "$T/origin.git" "$T/origin-away.git"
+OUT=$(cd "$W" && GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" --repo "$T/origin.git" \
+    --ref-dir refY.git --target-dir srcY --target-ref main 2>&1); RC=$?
+rc_is "an unreachable remote fails the run with the fetch code" 3
+hasnt "  deleting nothing" "from scratch"
+[ -d "$W/refY.git/objects" ] && ok "  the store is kept" || bad "  the store is kept"
+is  "  and the working tree too" KEEPME "$(cat "$W/srcY/untracked-artifact" 2>/dev/null)"
+mv "$T/origin-away.git" "$T/origin.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refY.git --target-dir srcY --target-ref main
+rc_is "  and the run heals once the remote returns" 0
+
+# --- the same when only the target's own fetch is failing -----------------
+rm -rf "$T/fakenet"; mkdir -p "$T/fakenet"
+cat > "$T/fakenet/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+	*" ls-remote --get-url "*) ;;
+	*" ls-remote "*) echo "fatal: simulated outage" >&2; exit 128 ;;
+	*" fetch "*) case " $* " in *"$FAIL_DIR"*) echo "fatal: simulated outage" >&2; exit 128 ;; esac ;;
+esac
+exec git_real "$@"
+EOF
+chmod +x "$T/fakenet/git"; ln -sf "$(command -v git)" "$T/fakenet/git_real"
+rm -rf "$W/srcX"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcX --target-ref main
+rc_is "prep: a healthy target" 0
+echo KEEPME > "$W/srcX/untracked-artifact"
+OUT=$(cd "$W" && PATH="$T/fakenet:$PATH" FAIL_DIR=srcX GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" \
+    --repo "$T/origin.git" --ref-dir ref.git --target-dir srcX --target-ref main 2>&1); RC=$?
+rc_is "a target that cannot fetch fails with the fetch code" 3
+hasnt "  without spending the working tree" "from scratch"
+is  "  which is kept" KEEPME "$(cat "$W/srcX/untracked-artifact" 2>/dev/null)"
+[ -d "$W/srcX" ] && ok "  and the directory itself" || bad "  and the directory itself"
+
+# --- a store too broken for the in-place repair ---------------------------
+rm -rf "$W/refZ.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refZ.git;  rc_is "prep: a store" 0
+rm -rf "$W/refZ.git/objects"; echo junk > "$W/refZ.git/objects"
+RUN "$W" --repo "$T/origin.git" --ref-dir refZ.git
+rc_is "a store whose object dir is a file" 0
+has "  is recloned from scratch" "recloning it from scratch"
+git -C "$W/refZ.git" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null \
+    && ok "  and serves refs again" || bad "  and serves refs again"
+[ -e "$W/refZ.git.gone" ] && bad "  leaving no trash behind" || ok "  leaving no trash behind"
+rm -rf "$W/srcV"
+RUN "$W" --repo "$T/origin.git" --ref-dir refZ.git --target-dir srcV --target-ref main
+rc_is "  and a checkout borrowing from it works" 0
+
+# --- a broken store is kept while the remote is down ----------------------
+rm -rf "$W/refP.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refP.git; rc_is "prep: a store to break offline" 0
+rm -rf "$W/refP.git/objects"; echo junk > "$W/refP.git/objects"
+mv "$T/origin.git" "$T/origin-away.git"
+OUT=$(cd "$W" && GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" --repo "$T/origin.git" --ref-dir refP.git 2>&1); RC=$?
+[ "$RC" != 0 ] && ok "a broken store during an outage fails" || bad "a broken store during an outage fails (rc=$RC)"
+has "  saying the remote is not answering" "not answering"
+[ -f "$W/refP.git/objects" ] && ok "  and is kept for when it returns" || bad "  and is kept for when it returns"
+mv "$T/origin-away.git" "$T/origin.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refP.git
+rc_is "  then heals by the reclone once it answers" 0
+has "  announcing it" "recloning it from scratch"
+
+# --- even then, a store of another repository is refused ------------------
+rm -rf "$W/refZ2.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refZ2.git; rc_is "prep: another store" 0
+rm -rf "$W/refZ2.git/objects"; echo junk > "$W/refZ2.git/objects"
+RUN "$W" --repo "$T/foreign.git" --ref-dir refZ2.git
+[ "$RC" != 0 ] && ok "a broken store of another repository is still refused" || bad "a broken store of another repository is still refused (rc=$RC)"
+[ -f "$W/refZ2.git/objects" ] && ok "  and left untouched" || bad "  and left untouched"
+
 # --- an unreadable config whose section names are upper case ------------
 rm -rf "$W/refB3"
 RUN "$W" --repo "$T/origin.git" --ref-dir refB3;  rc_is "prep: a reference dir" 0
@@ -652,6 +783,16 @@ OUT=$(cd "$W" && GITHUB_TOKEN=ghs_SUPERSECRETTOKENVALUE "$SH" "$SCRIPT" --debug 
     --repo "https://127.0.0.1:1/x.git" --ref-dir ref5.git 2>&1 || true)
 hasnt "the token stays out of the debug trace" "SUPERSECRETTOKENVALUE"
 hasnt "  and so does its base64" "$(printf 'x-access-token:ghs_SUPERSECRETTOKENVALUE' | base64 | tr -d '\n' | cut -c1-24)"
+
+# --- nor on the repair ladder of a reused https store --------------------
+rm -rf "$W/refT.git"; mkdir -p "$W/refT.git"; git -C "$W/refT.git" init -q --bare
+git -C "$W/refT.git" config remote.origin.url "https://127.0.0.1:1/x.git"
+OUT=$(cd "$W" && GITHUB_TOKEN=ghs_SUPERSECRETTOKENVALUE GIT_FETCH_RETRIES=1 "$SH" "$SCRIPT" --debug \
+    --repo "https://127.0.0.1:1/x" --ref-dir refT.git 2>&1); RC=$?
+rc_is "an unreachable https remote fails with the fetch code" 3
+[ -f "$W/refT.git/HEAD" ] && ok "  and the store is kept" || bad "  and the store is kept"
+hasnt "  with the token kept out of the trace" "SUPERSECRETTOKENVALUE"
+hasnt "  and its base64 too" "$(printf 'x-access-token:ghs_SUPERSECRETTOKENVALUE' | base64 | tr -d '\n' | cut -c1-24)"
 
 echo
 if [ "$SKIP" -gt 0 ]; then

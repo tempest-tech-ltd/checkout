@@ -66,9 +66,34 @@ refetched, then the checkout runs again. The working tree is kept throughout,
 since the checkout reconciles every tracked path against freshly fetched
 objects anyway.
 
-A reference dir is repaired in place, never deleted: other checkouts borrow
-objects from its store through alternates, and removing it would break every
-one of them.
+When even that was not enough, the last rung is what a human would do: delete
+the checkout and clone from nothing. It also heals what no repair above it
+can - debris git itself is unable to delete, such as read-only files left
+behind by a build. On this rung untracked content goes too, whatever `clean`
+says: that is the price of the reclone, paid once, and only on a checkout
+nothing gentler could fix.
+
+The last rung is earned, never defaulted to. It runs once; only for a
+directory whose identity was positively established - it came into the run as
+a checkout of the requested repository, or the run created it - so a data
+directory a typo pointed the action at is never deleted; never for an invalid
+invocation (a mistyped ref, a wrong repository); and only after the remote
+answered a probe, since deleting a working tree cannot fix an outage. A fetch
+that merely kept failing - a dying pack transfer, a proxy, a full disk -
+deletes nothing and ends the run with an exit code of its own (3): at this
+size a failing transfer is routine, and no local deletion fixes it. The
+delete itself is a rename: the old content moves aside, the clone goes to the
+original path, and a clone that fails puts the old content back.
+
+A reference dir is repaired in place, keeping its objects - other checkouts
+borrow them through alternates. Deleting the store and recloning is its own
+last rung, held to a stricter test: its structure refused even the
+reinitialization, or `git fsck` implicates its objects (a pack truncated by a
+killed fetch, say) - because there an in-place repair preserves exactly what
+is broken. The same rules hold: never for a store that belongs to another
+repository or that never showed an identity, and never while the remote does
+not answer. A checkout that borrowed objects the new store no longer holds is
+rebuilt by its own last rung the next time it runs.
 
 A ref that does not exist is treated as a caller mistake, not as damage - it
 fails without recreating anything. So does a reference dir belonging to another
