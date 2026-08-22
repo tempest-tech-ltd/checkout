@@ -568,6 +568,33 @@ ensure_ref_repo() {
 	replace_repo "$STORE_ABS" create_ref_repo
 }
 
+# gc never runs in the store - pruning would delete objects that checkouts
+# borrowing through alternates still reference, and the store knows nothing
+# about their refs; that is why every fetch above pins gc.auto=0. Without
+# it, daily fetches grow the store without bound: loose objects from small
+# fetches, one new pack per larger one. Repacking is the part of gc that is
+# safe here: objects are only ever moved into a pack, never deleted -
+# --keep-unreachable keeps even what only a borrower still reaches. Gated,
+# because the reachability walk behind a repack costs minutes on a large
+# history: the cheap pass fires on accumulated loose objects, the full
+# consolidation - which rewrites every pack and takes a while on a large
+# store - only when packs pile up. Raise the limits to leave the job to
+# external maintenance instead. Best effort: a failed repack never fails
+# the run.
+compact_store() {
+	GD=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 0
+	PACKS=$(find "$GD/objects/pack" -name '*.pack' -type f 2>/dev/null | wc -l | tr -d ' ')
+	LOOSE=$(find "$GD"/objects/[0-9a-f][0-9a-f] -type f 2>/dev/null | wc -l | tr -d ' ')
+	if [ "$PACKS" -gt "${GIT_STORE_PACK_LIMIT:-64}" ]; then
+		echo "Note: consolidating $PACKS packs in $1"
+		git -C "$1" repack -a -d -k -q 2>/dev/null || true
+	elif [ "$LOOSE" -gt "${GIT_STORE_LOOSE_LIMIT:-512}" ]; then
+		echo "Note: packing $LOOSE loose objects in $1"
+		git -C "$1" repack -d -q 2>/dev/null || true
+	fi
+	return 0
+}
+
 # --- target dir -----------------------------------------------------------
 
 create_target_repo() {
@@ -935,6 +962,7 @@ fi
 
 if [ "$REF_DIR" ]; then
 	ensure_ref_repo "$REF_DIR" || exit $?
+	compact_store "$REF_DIR"
 fi
 
 [ -z "$TARGET_DIR" ] && exit 0

@@ -860,6 +860,28 @@ RUN "$W" --repo "$T/origin.git" --ref-dir refC.git --target-dir refC.git.gone/sr
 has "  and says why" "is inside"
 is  "  the target survives" ten "$(cat "$W/refC.git.gone/src/a" 2>/dev/null)"
 
+# --- the store is compacted without ever deleting an object ---------------
+cd "$T/seed"; git checkout -qb keepme; echo K > a; git commit -qam k
+SHA_K=$(git rev-parse HEAD); git push -q "$T/origin.git" keepme; git checkout -q main; cd /
+RUN "$W" "${ARGS[@]}";                       rc_is "prep: an object soon unreachable" 0
+git -C "$T/seed" push -q "$T/origin.git" --delete keepme
+RUN "$W" "${ARGS[@]}";                       rc_is "prep: the branch is pruned away" 0
+OUT=$(cd "$W" && GIT_STORE_LOOSE_LIMIT=0 "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a store over the loose limit is packed" 0
+has "  and says so" "Note: packing"
+SHA_TIP=$(git -C "$W/ref.git" rev-parse refs/remotes/origin/main)
+[ -f "$W/ref.git/objects/$(printf %s "$SHA_TIP" | cut -c1-2)/$(printf %s "$SHA_TIP" | cut -c3-)" ] \
+    && bad "  the fetched tip moved into a pack" || ok "  the fetched tip moved into a pack"
+OUT=$(cd "$W" && GIT_STORE_PACK_LIMIT=0 "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a store over the pack limit is consolidated" 0
+has "  and says so" "Note: consolidating"
+is  "  into a single pack" 1 "$(find "$W/ref.git/objects/pack" -name '*.pack' | wc -l | tr -d ' ')"
+git -C "$W/ref.git" cat-file -e "$SHA_K" 2>/dev/null \
+    && ok "  keeping the object only a borrower may reach" || bad "  keeping the object only a borrower may reach"
+printf '#!/bin/sh\ncase " $* " in *" repack "*) echo "simulated repack failure" >&2; exit 1 ;; esac\nexec git_real "$@"\n' > "$T/fakebin/git"
+OUT=$(cd "$W" && PATH="$T/fakebin:$PATH" GIT_STORE_PACK_LIMIT=0 "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a failing repack does not fail the run" 0
+
 # --- even then, a store of another repository is refused ------------------
 rm -rf "$W/refZ2.git"
 RUN "$W" --repo "$T/origin.git" --ref-dir refZ2.git; rc_is "prep: another store" 0
