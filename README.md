@@ -175,10 +175,12 @@ The store is also kept from growing without bound. gc never runs in it -
 pruning would delete objects that checkouts still borrow - but repacking is
 safe: objects are only moved into packs, never deleted (`--keep-unreachable`).
 A run that finds more than `GIT_STORE_LOOSE_LIMIT` (512) loose objects packs
-them; one that finds more than `GIT_STORE_PACK_LIMIT` (64) packs rewrites them
-into one, which takes a while on a large store - raise the limits if a
-separate maintenance job should own this instead. A failed repack never fails
-the run.
+them - and when the leftovers alone still exceed the limit (unreachable loose,
+which only the full rewrite sweeps), it escalates to that rewrite in the same
+run rather than paying the walk again on every run after. One that finds more
+than `GIT_STORE_PACK_LIMIT` (64) packs rewrites them into one, which takes a
+while on a large store - raise the limits if a separate maintenance job should
+own this instead. A failed repack never fails the run.
 
 A reference dir must not be updated by two runs at once. Lock files left behind
 by an interrupted git are removed, which assumes the run owns that directory

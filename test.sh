@@ -872,6 +872,11 @@ has "  and says so" "Note: packing"
 SHA_TIP=$(git -C "$W/ref.git" rev-parse refs/remotes/origin/main)
 [ -f "$W/ref.git/objects/$(printf %s "$SHA_TIP" | cut -c1-2)/$(printf %s "$SHA_TIP" | cut -c3-)" ] \
     && bad "  the fetched tip moved into a pack" || ok "  the fetched tip moved into a pack"
+# The pruned branch left unreachable loose objects the incremental pass
+# cannot pack; the same run must escalate and sweep them, or this gate
+# would fire on every future run without ever lowering the counter.
+has "  the unreachable leftovers escalate the same run" "Note: consolidating to sweep"
+is  "  down to no loose objects at all" 0 "$(find "$W/ref.git"/objects/[0-9a-f][0-9a-f] -type f 2>/dev/null | wc -l | tr -d ' ')"
 OUT=$(cd "$W" && GIT_STORE_PACK_LIMIT=0 "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
 rc_is "a store over the pack limit is consolidated" 0
 has "  and says so" "Note: consolidating"

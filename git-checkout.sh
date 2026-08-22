@@ -594,6 +594,18 @@ compact_store() {
 	elif [ "$LOOSE" -gt "${GIT_STORE_LOOSE_LIMIT:-512}" ]; then
 		echo "Note: packing $LOOSE loose objects in $1"
 		git -C "$1" repack -d -q 2>/dev/null || true
+		# The incremental pass packs only reachable loose objects, while the
+		# counter above counts every one. Unreachable loose accumulate as a
+		# matter of course - force-updated merge refs, deleted branches - and
+		# once they alone exceed the limit, the gate would fire on every run
+		# and pay the reachability walk each time, lowering nothing. Only the
+		# -k form sweeps them into a pack; one stateless escalation converges
+		# in a single step.
+		LOOSE=$(find "$GD"/objects/[0-9a-f][0-9a-f] -type f 2>/dev/null | wc -l | tr -d ' ')
+		if [ "$LOOSE" -gt "${GIT_STORE_LOOSE_LIMIT:-512}" ]; then
+			echo "Note: consolidating to sweep $LOOSE unreachable loose objects in $1"
+			git -C "$1" repack -a -d -k -q 2>/dev/null || true
+		fi
 	fi
 	return 0
 }
