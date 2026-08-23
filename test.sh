@@ -1118,13 +1118,16 @@ hasnt "  never the value" "SALVSECRET"
 
 # --- filters never see the token -------------------------------------------
 rm -f "$T/tokprobe"
-git -C "$W/src" config filter.tokprobe.smudge "sh -c 'printf %s \"\${GITHUB_TOKEN-ABSENT}\" >\"$T/tokprobe\"; cat'"
+git -C "$W/src" config filter.tokprobe.smudge "sh -c 'printf %s \"\${GITHUB_TOKEN-ABSENT}/\${CHECKOUT_TOKEN-ABSENT}\" >\"$T/tokprobe\"; cat'"
 printf '%s\n' 'a filter=tokprobe' > "$W/src/.git/info/attributes"
 rm -f "$W/src/a"
-OUT=$(cd "$W" && GITHUB_TOKEN=ghs_FILTERSECRET "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+# CHECKOUT_TOKEN pre-exported by the caller: an inherited export attribute
+# must not smuggle the secret out under the internal name.
+OUT=$(cd "$W" && CHECKOUT_TOKEN=placeholder GITHUB_TOKEN=ghs_FILTERSECRET \
+    "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
 rc_is "a run through a smudge filter succeeds" 0
 [ -f "$T/tokprobe" ] && ok "  the filter ran" || bad "  the filter ran"
-is  "  and saw no token in its environment" ABSENT "$(cat "$T/tokprobe" 2>/dev/null)"
+is  "  and saw no token under either name" ABSENT/ABSENT "$(cat "$T/tokprobe" 2>/dev/null)"
 hasnt "  which never appears in output either" "FILTERSECRET"
 git -C "$W/src" config --unset filter.tokprobe.smudge
 rm -f "$W/src/.git/info/attributes" "$T/tokprobe"
