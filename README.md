@@ -175,9 +175,11 @@ anything that writes a ref, which includes the fetch - either can change
 tracked files on a run that then reports success. The rest of the local config
 is left alone: filters and `.git/info/attributes` shape the content of the
 working tree by design, which is what git-lfs is. No credential is available
-to filters, though - the token is scoped to the fetches and the remote probe -
-so a private LFS endpoint needs credentials of its own (v2 leaving the token
-behind in every config was a leak, not a feature).
+to filters, though: the raw token is removed from the environment before the
+first git command runs, and survives only as unexported shell state scoped to
+the fetches and the remote probe - so a private LFS endpoint needs
+credentials of its own (v2 leaving the token behind in every config was a
+leak, not a feature).
 
 A target with linked work trees registered under its `.git` is used as it is
 but never rebuilt: their administrative files live there and nowhere else, so

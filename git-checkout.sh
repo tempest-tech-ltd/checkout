@@ -41,6 +41,15 @@ unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
 	GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 \
 	GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_ATTR_SOURCE
 
+# The runner exports the token to the whole step. It leaves the environment
+# here - before any option is parsed, any trace enabled or any git command
+# run - so no child of any git command, a smudge filter included, can read
+# it; it survives only as unexported shell state for grant_token. set +a
+# first: an inherited allexport would silently re-export the copy.
+set +a
+CHECKOUT_TOKEN=${GITHUB_TOKEN-}
+unset GITHUB_TOKEN
+
 # A replacement ref is the same redirection one level down: it swaps the tree
 # behind a commit while its id - the one every check here compares - stays the
 # requested one. The refs are left in place, they are just not applied.
@@ -393,10 +402,10 @@ drop_token() {
 grant_token() {
 	XTRACE=
 	case $- in *x*) XTRACE=1; set +x ;; esac
-	if [ "$URL_FROM_CALLER" ] && [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
+	if [ "$URL_FROM_CALLER" ] && [ "$URL" = "https://${URL#https://}" ] && [ "$CHECKOUT_TOKEN" ]; then
 		GIT_CONFIG_COUNT=3
 		GIT_CONFIG_KEY_2=http.extraHeader
-		GIT_CONFIG_VALUE_2="Authorization: basic $(printf '%s' "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n')"
+		GIT_CONFIG_VALUE_2="Authorization: basic $(printf '%s' "x-access-token:$CHECKOUT_TOKEN" | base64 | tr -d '\n')"
 		export GIT_CONFIG_COUNT GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
 	fi
 	[ "$XTRACE" ] && set -x
@@ -421,11 +430,24 @@ fetch_repo() {
 	# since it usually comes from the machine's own config and nothing here
 	# could repair it. Asked in the same dir the fetch runs in, which is what
 	# decides the answer.
-	EFFECTIVE=$(git -C "$DIR" ls-remote --get-url "$URL") || return $RC_DAMAGE
-	if ! same_repo "$EFFECTIVE" "$URL"; then
-		echo "Error: git config rewrites '$(shown "$URL")' to '$(shown "$EFFECTIVE")' - remove the url.*.insteadOf entry" >&2
-		return $RC_INVALID
+	# Read and judged with xtrace off: a rewrite is machine configuration
+	# nobody validated, and it can splice credentials into the effective
+	# url - the trace would print them before shown() could mask anything.
+	FR_XT=; case $- in *x*) FR_XT=1; set +x ;; esac
+	FR_ACT=ok
+	EFFECTIVE=$(git -C "$DIR" ls-remote --get-url "$URL") || FR_ACT=unreadable
+	if [ "$FR_ACT" = ok ] && ! same_repo "$EFFECTIVE" "$URL"; then
+		FR_ACT=rewritten
+		FR_SHOWN=$(shown "$EFFECTIVE")
+		FR_URL_SHOWN=$(shown "$URL")
 	fi
+	[ "$FR_XT" ] && set -x
+	case "$FR_ACT" in
+		unreadable ) return $RC_DAMAGE ;;
+		rewritten )
+			echo "Error: git config rewrites '$FR_URL_SHOWN' to '$FR_SHOWN' - remove the url.*.insteadOf entry" >&2
+			return $RC_INVALID ;;
+	esac
 	grant_token
 	# Anything an older version of this script persisted.
 	git -C "$DIR" config --unset-all http.extraHeader 2>/dev/null || true
@@ -457,8 +479,14 @@ fetch_repo() {
 # no evidence. The rewrite check runs before the token is granted, so the
 # credential is never sent to a host a rewrite chose.
 probe_remote() {
-	PROBE_EFFECTIVE=$(git -C "$1" ls-remote --get-url "$URL" 2>/dev/null) || return 1
-	same_repo "$PROBE_EFFECTIVE" "$URL" || return 1
+	# The same xtrace discipline as fetch_repo's rewrite check: the
+	# effective url is unvalidated machine configuration.
+	PR_XT=; case $- in *x*) PR_XT=1; set +x ;; esac
+	PR_OK=
+	PROBE_EFFECTIVE=$(git -C "$1" ls-remote --get-url "$URL" 2>/dev/null) \
+		&& same_repo "$PROBE_EFFECTIVE" "$URL" && PR_OK=1
+	[ "$PR_XT" ] && set -x
+	[ "$PR_OK" ] || return 1
 	grant_token
 	git -C "$1" ls-remote "$URL" HEAD >/dev/null 2>&1
 	PROBE_RC=$?
@@ -669,16 +697,20 @@ ensure_ref_repo() {
 				sub(/^[[:space:]]*[Uu][Rr][Ll][[:space:]]*=[[:space:]]*/, ""); print; exit
 			}' "$1/config")
 		SLV_ACT=ok
+		SLV_SHOWN=
+		SLV_URL_SHOWN=
 		if [ "$SALVAGED" ]; then
-			if [ -z "$URL" ]; then
-				if url_has_userinfo "$SALVAGED"; then
-					SLV_ACT=creds
-				else
-					URL=$SALVAGED
-					REF_IDENTIFIED="salvaged"
-				fi
+			# Credentials first, whatever the caller supplied: a value
+			# like that is neither adopted nor compared nor echoed.
+			if url_has_userinfo "$SALVAGED"; then
+				SLV_ACT=creds
+			elif [ -z "$URL" ]; then
+				URL=$SALVAGED
+				REF_IDENTIFIED="salvaged"
 			elif ! same_repo "$SALVAGED" "$URL"; then
 				SLV_ACT=mismatch
+				SLV_SHOWN=$(shown "$SALVAGED")
+				SLV_URL_SHOWN=$(shown "$URL")
 			else
 				REF_IDENTIFIED="salvaged"
 			fi
@@ -686,10 +718,10 @@ ensure_ref_repo() {
 		[ "$SLV_XT" ] && set -x
 		case "$SLV_ACT" in
 			creds )
-				echo "Error: the salvaged origin of $1 carries credentials; refusing to adopt it" >&2
+				echo "Error: the salvaged origin of $1 carries credentials; refusing it" >&2
 				return $RC_INVALID ;;
 			mismatch )
-				echo "Error: $1 has an unreadable config; its origin reads '$(shown "$SALVAGED")', not '$(shown "$URL")'" >&2
+				echo "Error: $1 has an unreadable config; its origin reads '$SLV_SHOWN', not '$SLV_URL_SHOWN'" >&2
 				return $RC_INVALID ;;
 		esac
 		echo "Warning: $1 has an unreadable config, moving it aside" >&2

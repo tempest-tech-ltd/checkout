@@ -1092,6 +1092,43 @@ OUT=$(cd "$W" && "$SH" "$SCRIPT" --debug "${ARGS[@]}" 2>&1); RC=$?
 rc_is "a poisoned target origin is rebuilt as usual" 0
 hasnt "  without the secret reaching the log" "STOREDSECRET"
 
+# --- a credential-bearing insteadOf rewrite never reaches the trace --------
+rm -rf "$W/refR.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refR.git; rc_is "prep: a store to rewrite" 0
+git -C "$W/refR.git" config "url.https://u:REWRITESECRET@127.0.0.1/r.insteadOf" "$T/origin.git"
+OUT=$(cd "$W" && "$SH" "$SCRIPT" --debug --repo "$T/origin.git" --ref-dir refR.git 2>&1); RC=$?
+[ "$RC" != 0 ] && ok "a credential-bearing store rewrite is refused" || bad "a credential-bearing store rewrite is refused (rc=$RC)"
+has "  as a rewrite" "rewrites"
+hasnt "  with the secret kept out of the trace" "REWRITESECRET"
+git -C "$W/refR.git" config --unset "url.https://u:REWRITESECRET@127.0.0.1/r.insteadOf"
+git -C "$W/src" config "url.https://u:REWRITESECRET@127.0.0.1/r.insteadOf" "$T/origin.git"
+OUT=$(cd "$W" && "$SH" "$SCRIPT" --debug "${ARGS[@]}" 2>&1); RC=$?
+[ "$RC" != 0 ] && ok "the same for a target rewrite" || bad "the same for a target rewrite (rc=$RC)"
+hasnt "  secret still absent" "REWRITESECRET"
+git -C "$W/src" config --unset "url.https://u:REWRITESECRET@127.0.0.1/r.insteadOf"
+
+# --- a salvaged origin with credentials stays generic ----------------------
+rm -rf "$W/refB4"
+RUN "$W" --repo "$T/origin.git" --ref-dir refB4;  rc_is "prep: a reference dir" 0
+printf '[remote "origin"]\n\turl = https://u:SALVSECRET@127.0.0.1/x\n[' > "$W/refB4/config"
+OUT=$(cd "$W" && "$SH" "$SCRIPT" --debug --repo "$T/origin.git" --ref-dir refB4 2>&1); RC=$?
+[ "$RC" != 0 ] && ok "a salvaged origin with credentials is refused" || bad "a salvaged origin with credentials is refused (rc=$RC)"
+has "  with a generic message" "carries credentials"
+hasnt "  never the value" "SALVSECRET"
+
+# --- filters never see the token -------------------------------------------
+rm -f "$T/tokprobe"
+git -C "$W/src" config filter.tokprobe.smudge "sh -c 'printf %s \"\${GITHUB_TOKEN-ABSENT}\" >\"$T/tokprobe\"; cat'"
+printf '%s\n' 'a filter=tokprobe' > "$W/src/.git/info/attributes"
+rm -f "$W/src/a"
+OUT=$(cd "$W" && GITHUB_TOKEN=ghs_FILTERSECRET "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a run through a smudge filter succeeds" 0
+[ -f "$T/tokprobe" ] && ok "  the filter ran" || bad "  the filter ran"
+is  "  and saw no token in its environment" ABSENT "$(cat "$T/tokprobe" 2>/dev/null)"
+hasnt "  which never appears in output either" "FILTERSECRET"
+git -C "$W/src" config --unset filter.tokprobe.smudge
+rm -f "$W/src/.git/info/attributes" "$T/tokprobe"
+
 # --- an unowned journal is never removed -----------------------------------
 rm -rf "$W/refJ.git" "$W/refJ.git.gone-journal"
 RUN "$W" --repo "$T/origin.git" --ref-dir refJ.git; rc_is "prep: a store for journal squatters" 0
