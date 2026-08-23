@@ -1132,6 +1132,14 @@ hasnt "  which never appears in output either" "FILTERSECRET"
 git -C "$W/src" config --unset filter.tokprobe.smudge
 rm -f "$W/src/.git/info/attributes" "$T/tokprobe"
 
+# --- an inherited xtrace cannot trace the token capture --------------------
+# env, not a prefix assignment: SHELLOPTS is readonly inside the harness
+# shell. dash ignores SHELLOPTS, so there this only proves the run works.
+OUT=$(cd "$W" && env SHELLOPTS=xtrace GITHUB_TOKEN=ghs_SHELLSECRET \
+    "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a run under an inherited xtrace succeeds" 0
+hasnt "  with the token capture untraced" "SHELLSECRET"
+
 # --- an unowned journal is never removed -----------------------------------
 rm -rf "$W/refJ.git" "$W/refJ.git.gone-journal"
 RUN "$W" --repo "$T/origin.git" --ref-dir refJ.git; rc_is "prep: a store for journal squatters" 0

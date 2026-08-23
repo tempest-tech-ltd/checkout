@@ -44,12 +44,15 @@ unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
 # The runner exports the token to the whole step. It leaves the environment
 # here - before any option is parsed, any trace enabled or any git command
 # run - so no child of any git command, a smudge filter included, can read
-# it; it survives only as unexported shell state for grant_token. set +a
-# first: an inherited allexport would silently re-export the copy. And the
+# it; it survives only as unexported shell state for grant_token. set +ax
+# first: SHELLOPTS in the environment can deliver allexport - which would
+# silently re-export the copy - and xtrace, which would print the very
+# assignment below before anything could stop it. Tracing that was asked
+# for properly, via --debug, starts later, once the url is judged. And the
 # destination is unset before the assignment: a CHECKOUT_TOKEN inherited
 # from the environment carries its export attribute through set +a, and a
 # plain assignment would hand the secret to every child under the new name.
-set +a
+set +ax
 unset CHECKOUT_TOKEN
 CHECKOUT_TOKEN=${GITHUB_TOKEN-}
 unset GITHUB_TOKEN
