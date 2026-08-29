@@ -155,6 +155,8 @@ ref_repo() {
 	SAVED_PWD=$PWD
 	if [ -d "$REF_DIR/objects" ] || [ -d "$REF_DIR/refs" ]; then
 		check_ref_identity
+		[ "`git -C "$REF_DIR" rev-parse --is-bare-repository 2>/dev/null`" = true ] ||
+			echo "SELF-HEAL: store reinit $REF_DIR"
 	elif [ "`find "$REF_DIR" -mindepth 1 -maxdepth 1`" ]; then
 		echo "Error: not a repository store: $REF_DIR" && exit 1
 	fi
@@ -189,7 +191,8 @@ init_target_repo() {
 		[ "`git config --get remote.origin.url 2>/dev/null`" ]; then
 		:
 	else
-		[ -e .git ] && echo "SELF-HEAL: target git-dir $TARGET_DIR"
+		# A dir with files but no .git is a repair, not a fresh clone.
+		[ "`find . -mindepth 1 -maxdepth 1`" ] && echo "SELF-HEAL: target git-dir $TARGET_DIR"
 		rm -rf .git
 		REBUILT=1
 	fi
@@ -307,7 +310,6 @@ target_repo() {
 		# fetch, clean and checkout fail against a healthy store - on this
 		# run and on every next one.
 		[ "$REBUILT" ] && exit 1
-		echo "SELF-HEAL: target git-dir $TARGET_DIR"
 		rm -rf .git
 		REBUILT=1
 		init_target_repo

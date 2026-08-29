@@ -116,7 +116,17 @@ RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src2 --target-ref
 rc_is "a work tree that was never a repository" 0
 is  "  overwrites an untracked file on a tracked path" three "$(cat "$W/src2/a")"
 is  "  and keeps one that is in nobody's way" KEEPME "$(cat "$W/src2/marker")"
-hasnt "  without calling it a repair" "$HEAL"
+is  "  and says so once" 1 "$(echo "$OUT" | grep -c "$TARGET_HEAL")"
+
+rm -rf "$W/src6"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src6 --target-ref main
+rc_is "a target directory that did not exist" 0
+hasnt "  is a clone, not a repair" "$HEAL"
+
+rm -rf "$W/src7"; mkdir -p "$W/src7"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src7 --target-ref main
+rc_is "an empty target directory" 0
+hasnt "  is a clone too" "$HEAL"
 
 # --- damage the action is expected to heal on its own --------------------
 mkdir -p "$W/src/out"; echo CACHE > "$W/src/out/artifact.o"
@@ -189,7 +199,8 @@ hasnt "  and heals nothing" "$HEAL"
 OBJ_BEFORE=$(objects "$W/ref.git/objects")
 rm "$W/ref.git/HEAD"
 RUN "$W" "${ARGS[@]}";                        rc_is "a store with no HEAD" 0
-hasnt "  is repaired where it stands" "$HEAL"
+has "  says it was reinitialized" "$HEAL: store reinit"
+hasnt "  and was not recloned" "$HEAL: store reclone"
 OBJ_AFTER=$(objects "$W/ref.git/objects")
 [ "$OBJ_AFTER" -ge "$OBJ_BEFORE" ] && ok "  keeping its objects ($OBJ_BEFORE -> $OBJ_AFTER)" \
     || bad "  keeping its objects ($OBJ_BEFORE -> $OBJ_AFTER)"
@@ -202,6 +213,11 @@ is_path "  gets the url back" "$T/origin.git" "$(git -C "$W/ref.git" config --ge
 git -C "$W/ref.git" config --get-all remote.origin.fetch | grep -q 'refs/heads' \
     && ok "  and the heads refspec" || bad "  and the heads refspec"
 hasnt "  with nothing deleted" "$HEAL"
+
+rm -rf "$W/refF.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refF.git
+rc_is "a store that did not exist" 0
+hasnt "  is a clone, not a repair" "$HEAL"
 
 rm -rf "$W/refC.git"
 RUN "$W" --repo "$T/origin.git" --ref-dir refC.git;  rc_is "prep: a store to break" 0
@@ -458,6 +474,16 @@ if [ "$HAVE_PERM" ]; then
 	is  "  rebuilds the git dir once, and no more" 1 "$(echo "$OUT" | grep -c "$TARGET_HEAL")"
 	is  "  the debris is left where it is" x "$(cat "$W/srcJ/junk/sub/f" 2>/dev/null)"
 	chmod u+w "$W/srcJ/junk/sub"; rm -rf "$W/srcJ"
+	rm -rf "$W/srcJ2"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcJ2 --target-ref main
+	rc_is "prep: another target to jam" 0
+	mkdir -p "$W/srcJ2/junk/sub"; echo x > "$W/srcJ2/junk/sub/f"; chmod a-w "$W/srcJ2/junk/sub"
+	rm -rf "$W/srcJ2/.git"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcJ2 --target-ref main --clean
+	rc_is "the same debris in a slot that lost its .git" 1
+	is  "  rebuilds the git dir once, and no more" 1 "$(echo "$OUT" | grep -c "$TARGET_HEAL")"
+	is  "  the debris is left where it is" x "$(cat "$W/srcJ2/junk/sub/f" 2>/dev/null)"
+	chmod u+w "$W/srcJ2/junk/sub"; rm -rf "$W/srcJ2"
 else
 	skip "untracked debris that clean cannot remove (deletes are not blocked here)"
 fi
