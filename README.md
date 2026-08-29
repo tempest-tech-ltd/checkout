@@ -22,7 +22,8 @@ Note: requires git version >= 2.35
     # Default:
     common-path: ${repository}.git
 
-    # Relative path under GITHUB_WORKSPACE to place the repository
+    # Path to place the repository, relative to GITHUB_WORKSPACE or absolute
+    # (an absolute path outside the workspace is supported)
     # Default:
     path: null
 
