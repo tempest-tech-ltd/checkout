@@ -76,6 +76,8 @@ drop_token_env() {
 is_fs_root() {
 	case "$1" in
 		"" | / | // | ?:[/\\] | ?:[/\\][/\\] ) return 0 ;;
+		//*/*/* ) return 1 ;;
+		//* ) return 0 ;;
 	esac
 	return 1
 }
@@ -208,6 +210,7 @@ init_target_repo() {
 	echo "$REF_DIR"/objects > .git/objects/info/alternates
 	# Kept in the target's config so later steps can push, as actions/checkout
 	# does with persist-credentials.
+	git config --unset-all http.extraHeader 2>/dev/null || true
 	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
 		git config --replace-all http.extraHeader "Authorization: basic `creds`"
 	fi

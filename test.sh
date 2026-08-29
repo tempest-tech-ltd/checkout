@@ -99,12 +99,17 @@ is  "  survives without --clean" CACHE "$(cat "$W/src/out/devel/artifact.o")"
 RUN "$W" "${ARGS[@]}" --clean;                rc_is "the same file with --clean" 0
 [ -e "$W/src/out/devel/artifact.o" ] && bad "  is removed" || ok "  is removed"
 
-printf 'out/\n' > "$W/src/.gitignore-probe"; mkdir -p "$W/src/out"; echo IGNORED > "$W/src/out/ignored.o"
+# In info/exclude, not a .gitignore: a tracked file would have to be added to
+# the repository, and an untracked one is not ignored - it is just untracked.
+printf 'out/\n' > "$W/src/.git/info/exclude"; mkdir -p "$W/src/out"; echo IGNORED > "$W/src/out/ignored.o"
+git -C "$W/src" status --porcelain --ignored | grep -q '^!! out/' \
+    && ok "prep: git does ignore it" || bad "prep: git does ignore it"
 RUN "$W" "${ARGS[@]}";                        rc_is "an ignored file" 0
 is  "  survives without --clean" IGNORED "$(cat "$W/src/out/ignored.o")"
 RUN "$W" "${ARGS[@]}" --clean;                rc_is "and with --clean" 0
 [ -e "$W/src/out/ignored.o" ] && bad "  it is removed" || ok "  it is removed"
-rm -f "$W/src/.gitignore-probe"
+hasnt "  by cleaning it, not by rebuilding the git dir" "$TARGET_HEAL"
+: > "$W/src/.git/info/exclude"
 
 is  "the branch is set up to push" origin "$(git -C "$W/src" config branch.main.remote)"
 is  "  at the ref it was checked out from" refs/heads/main "$(git -C "$W/src" config branch.main.merge)"
@@ -367,7 +372,7 @@ rc_is "half a store is repaired rather than refused" 0
 [ -d "$W/refR/objects" ] && ok "  and gets its objects" || bad "  and gets its objects"
 
 # --- paths this script refuses to work on -------------------------------
-for ROOT in / //; do
+for ROOT in / // //srv/share; do
     RUN "$W" --repo "$T/origin.git" --ref-dir "$ROOT"
     rc_is "the store may not be '$ROOT'" 1
     has "  and says why" "unsafe repository directory"
@@ -448,6 +453,12 @@ is  "  leaves it in the target config, for the steps that push" "$WANT_HDR" \
 is  "  and nothing in the store, which every job shares" "" \
     "$(git config --file "$W/refK.git/config" --get http.extraHeader || true)"
 hasnt "  with the token itself kept out of the output" TOKENVALUE
+
+OUT=$(cd "$W" && GIT_CONFIG_GLOBAL="$T/gitconfig" "$SH" "$SCRIPT" \
+    --repo https://example.invalid/repo.git --ref-dir refK.git --target-dir srcK --target-ref main 2>&1); RC=$?
+rc_is "the next run, with no token at all" 0
+is  "  takes the last one out of the target config" "" \
+    "$(git config --file "$W/srcK/.git/config" --get http.extraHeader || true)"
 
 # --- a checkout the next steps can push from ----------------------------
 ( cd "$T/seed" && git checkout -qb pushable && echo p > a && git commit -qam p &&

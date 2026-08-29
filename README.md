@@ -29,7 +29,7 @@ Note: requires git version >= 2.35
 
     # A branch, tag or SHA to checkout
     # Default (if path is not null):
-    ref: ${{ github.ref_name }}
+    ref: ${{ github.event_name == 'pull_request' && format('pull/{0}', github.ref_name) || github.ref_name }}
 
     # Whether to clean working directory or not
     # Default:
@@ -49,7 +49,8 @@ When the step succeeds:
   tracked path is overwritten.
 - With `clean: true` the working directory holds nothing else: untracked and
   ignored files, build output included, are removed. With `clean: false` they
-  are left exactly as they were.
+  are left exactly as they were, except an untracked file sitting on a tracked
+  path, which the forced checkout overwrites.
 - The token stays in the checkout's `.git/config`, so the steps after this one
   can push (see below). It is never written into the common (reference) repo,
   which every job on the runner shares.

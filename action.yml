@@ -27,7 +27,8 @@ inputs:
       A branch, tag or SHA to checkout. A name is looked up on the remote
       only: a branch resolves to origin/<name> and a local branch of that
       name never stands in for it.
-      Default: github.ref_name
+      Default: the ref the workflow runs on - pull/N/merge on a pull request,
+      github.ref_name otherwise
   clean:
     description: |
       Whether to clean working directory or not.
