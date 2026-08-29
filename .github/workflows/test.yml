@@ -1,0 +1,66 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        # The agents that consume this action run it on Linux, on git-bash
+        # and on macOS, where /bin/bash is still 3.2 - so the script has to
+        # hold up under a strict POSIX shell as well as a modern bash.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        shell: [bash]
+        include:
+          - os: ubuntu-latest
+            shell: dash
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dash
+        if: matrix.shell == 'dash'
+        run: sudo apt-get install -y dash
+
+      - name: Run the integration tests
+        env:
+          SH: ${{ matrix.shell }}
+          GIT_FETCH_RETRIES: 2
+          GIT_FETCH_DELAY: 1
+        run: ./test.sh
+
+  # The suite exercises git-checkout.sh directly; this leg exercises the
+  # composite wrapper itself - input plumbing, default-ref derivation, the
+  # command construction.
+  smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the action against this repository
+        uses: ./
+        with:
+          token: ${{ github.token }}
+          common-path: smoke/store.git
+          path: smoke/src
+
+      - name: The checkout is real and at the right commit
+        shell: bash
+        run: |
+          test -f smoke/src/git-checkout.sh
+          [ "$(git -C smoke/src rev-parse HEAD)" = "$GITHUB_SHA" ]
