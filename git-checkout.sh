@@ -41,9 +41,13 @@ add_refspec() {
 # The url and the refspecs every fetch below relies on, written into whatever
 # config is there. 'git config' rather than 'git remote add', which fails on a
 # remote section that exists without a url - a half-written config's own state.
+# The list of refspecs is ours the way the url is: --replace-all drops whatever
+# else the key held, because a negative one left behind by hand ('^refs/heads/
+# main') survives an --add, keeps the fetch from updating that branch, and the
+# run then reports success over a checkout of an older commit.
 set_git_cfg() {
 	git config --replace-all remote.origin.url "$URL"
-	add_refspec '+refs/heads/*:refs/remotes/origin/*'
+	git config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
 	add_refspec '+refs/pull/*/head:refs/remotes/origin/pull/*/head'
 	add_refspec '+refs/pull/*/merge:refs/remotes/origin/pull/*/merge'
 }

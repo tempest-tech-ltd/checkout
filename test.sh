@@ -330,6 +330,22 @@ RUN "$SP" "${SARGS[@]}";                      rc_is "a path with a space, first 
 RUN "$SP" "${SARGS[@]}";                      rc_is "a path with a space, second run" 0
 is  "  checks out the ref" five "$(cat "$SP/src dir/a")"
 
+# --- a refspec left behind by hand must not steer the fetch -------------
+# A negative refspec survives an --add and quietly stops the branch from being
+# updated: origin/main stays where it was, HEAD matches it, and the run reports
+# success over an older commit.
+git -C "$W/src" config --add remote.origin.fetch '^refs/heads/main'
+advance six
+RUN "$W" "${ARGS[@]}";                        rc_is "a negative refspec in the target" 0
+is  "  does not keep the checkout behind" six "$(cat "$W/src/a")"
+is  "  and the refspecs are ours again" 3 "$(git -C "$W/src" config --get-all remote.origin.fetch | wc -l | tr -d ' ')"
+
+git -C "$W/ref.git" config --add remote.origin.fetch '^refs/heads/main'
+advance seven
+RUN "$W" "${ARGS[@]}";                        rc_is "a negative refspec in the store" 0
+is  "  does not hold the store back either" seven "$(cat "$W/src/a")"
+is  "  with our refspecs restored there too" 3 "$(git -C "$W/ref.git" config --get-all remote.origin.fetch | wc -l | tr -d ' ')"
+
 # --- the token: kept where the next step needs it, nowhere else ---------
 # The store and the target are fetched over https so the token applies, and
 # the machine's own config sends that url at the local origin. Nothing here
