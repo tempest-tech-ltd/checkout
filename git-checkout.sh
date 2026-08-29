@@ -1,6 +1,8 @@
 #!/bin/sh
 
-set -e  # blind inside a function called from 'if !': there every command carries its own '|| return 1'
+# Off inside 'if ! f' and 'f || x': ref_steps and target_steps guard every
+# command with '|| return 1'; clean is judged by its final git status.
+set -e
 
 usage() {
 	echo Usage: `basename $0` "[--repo REPO_URL] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
@@ -123,9 +125,8 @@ clear_locks() {
 	find "$1" -name '*.lock' -type f -delete 2>/dev/null || true
 }
 
-# Read from the file, not through git: the store may not open at all. Unset,
-# unreadable or several values count as ours; only a different repository,
-# plainly stated, is refused.
+# Read from the file, not through git: the store may not open at all. Unset or
+# unreadable counts as ours; of several values the last one is judged.
 check_ref_identity() {
 	GURL=`git config --file "$REF_DIR/config" --get remote.origin.url 2>/dev/null` || GURL=
 	[ "$GURL" ] || return 0
@@ -153,10 +154,10 @@ probe_remote() {
 
 ref_repo() {
 	SAVED_PWD=$PWD
+	REINIT=
 	if [ -d "$REF_DIR/objects" ] || [ -d "$REF_DIR/refs" ]; then
 		check_ref_identity
-		[ "`git -C "$REF_DIR" rev-parse --is-bare-repository 2>/dev/null`" = true ] ||
-			echo "SELF-HEAL: store reinit $REF_DIR"
+		[ "`git -C "$REF_DIR" rev-parse --is-bare-repository 2>/dev/null`" = true ] || REINIT=1
 	elif [ "`find "$REF_DIR" -mindepth 1 -maxdepth 1`" ]; then
 		echo "Error: not a repository store: $REF_DIR" && exit 1
 	fi
@@ -170,6 +171,8 @@ ref_repo() {
 		mkdir -p "$REF_DIR"
 		cd "$REF_DIR"
 		ref_steps || exit 1
+	elif [ "$REINIT" ]; then
+		echo "SELF-HEAL: store reinit $REF_DIR"
 	fi
 	drop_token_env
 	cd "$SAVED_PWD"

@@ -33,6 +33,7 @@ inputs:
       Whether to clean working directory or not.
       Tracked files match the checked out commit either way; clean also
       removes untracked and ignored files, build output included.
+    default: true
 runs:
   using: 'composite'
   steps:
@@ -57,7 +58,14 @@ runs:
         CLEAN=$INPUT_CLEAN
 
         REPO=${REPO:-$GITHUB_REPOSITORY}
-        [ "$TARGET_DIR" ] && TARGET_REF=${TARGET_REF:-$DEFAULT_REF}
+        # github.ref_name reads 'N/merge' on a pull request, which is not the
+        # name the merge ref is fetched under.
+        if [ "$TARGET_DIR" ] && [ -z "$TARGET_REF" ]; then
+          case "$GITHUB_REF" in
+            refs/pull/*) TARGET_REF=${GITHUB_REF#refs/} ;;
+            *) TARGET_REF=$DEFAULT_REF ;;
+          esac
+        fi
         [ ! "$TARGET_DIR" ] && CLEAN=
 
         if [[ "$REPO" == https://* ]]; then

@@ -201,6 +201,7 @@ rm "$W/ref.git/HEAD"
 RUN "$W" "${ARGS[@]}";                        rc_is "a store with no HEAD" 0
 has "  says it was reinitialized" "$HEAL: store reinit"
 hasnt "  and was not recloned" "$HEAL: store reclone"
+is  "  saying it once" 1 "$(echo "$OUT" | grep -c "$HEAL")"
 OBJ_AFTER=$(objects "$W/ref.git/objects")
 [ "$OBJ_AFTER" -ge "$OBJ_BEFORE" ] && ok "  keeping its objects ($OBJ_BEFORE -> $OBJ_AFTER)" \
     || bad "  keeping its objects ($OBJ_BEFORE -> $OBJ_AFTER)"
@@ -227,6 +228,15 @@ rc_is "a store whose object store is not a directory" 0
 has "  is recloned" "$HEAL: store reclone"
 [ -d "$W/refC.git/objects" ] && ok "  and comes back whole" || bad "  and comes back whole"
 is_path "  with our origin" "$T/origin.git" "$(git -C "$W/refC.git" config --get remote.origin.url)"
+
+rm -rf "$W/refB.git"
+RUN "$W" --repo "$T/origin.git" --ref-dir refB.git;  rc_is "prep: a store to tear" 0
+printf '[' > "$W/refB.git/config"
+RUN "$W" --repo "$T/origin.git" --ref-dir refB.git
+rc_is "a store whose config git cannot parse" 0
+is  "  reports one repair, not two" 1 "$(echo "$OUT" | grep -c "$HEAL")"
+has "  and it is the reclone" "$HEAL: store reclone"
+is_path "  with our origin" "$T/origin.git" "$(git -C "$W/refB.git" config --get remote.origin.url)"
 
 # --- an origin that does not answer deletes nothing ----------------------
 OBJ_BEFORE=$(objects "$W/ref.git/objects")
