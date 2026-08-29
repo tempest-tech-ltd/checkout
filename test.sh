@@ -32,6 +32,8 @@ is_path() {
 	[ -n "$A" ] && [ "$A" = "$B" ] && ok "$1" || bad "$1 (want '$2', got '$3')"
 }
 objects() { find "$1" -type f 2>/dev/null | wc -l | tr -d ' '; }
+# What a target holds itself, leaving out objects/info - where alternates live.
+own_objects() { find "$1" -type f 2>/dev/null | grep -v '/info/' | wc -l | tr -d ' '; }
 
 RUN() { local wd=$1; shift; OUT=$(cd "$wd" && "$SH" "$SCRIPT" "$@" 2>&1); RC=$?; }
 
@@ -52,6 +54,16 @@ W=$T/ws; mkdir -p "$W"
 ARGS=(--repo "$T/origin.git" --ref-dir ref.git --target-dir src --target-ref main)
 HEAL="SELF-HEAL"
 TARGET_HEAL="SELF-HEAL: target git-dir"
+
+# Where ln -s only copies - git-bash without winsymlinks:nativestrict - the
+# symlink cases would pass without testing anything.
+if ln -s . "$T/symprobe" 2>/dev/null && [ -L "$T/symprobe" ]; then HAVE_SYMLINK=1; else HAVE_SYMLINK=; fi
+rm -rf "$T/symprobe"
+# Where an unwritable directory does not stop a delete - running as root, or
+# git-bash, whose chmod does not bite - clean cannot be made to fail.
+mkdir -p "$T/wprobe/d"; echo x > "$T/wprobe/d/f"; chmod a-w "$T/wprobe/d"
+if rm "$T/wprobe/d/f" 2>/dev/null; then HAVE_PERM=; else HAVE_PERM=1; fi
+chmod u+w "$T/wprobe/d"; rm -rf "$T/wprobe"
 
 echo "# checkout under $SH ($("$SH" -c 'echo $0') / git $(git --version | awk '{print $3}'))"
 
@@ -138,12 +150,28 @@ rc_is "a target that was init'd but never fetched" 0
 is  "  is checked out" three "$(cat "$W/src3/a")"
 
 rm -rf "$W/src4"; mkdir -p "$W/src4"; echo "gitdir: $W/src/.git" > "$W/src4/.git"
-S_HEAD=$(git -C "$W/src" rev-parse HEAD)
+S_HEAD=$(git -C "$W/src" rev-parse HEAD); S_TREE=$(git -C "$W/src" status --porcelain)
 RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src4 --target-ref main
 rc_is "a target whose .git names another checkout" 0
 [ -d "$W/src4/.git" ] && ok "  gets a git dir of its own" || bad "  gets a git dir of its own"
 is  "  and the ref's content" three "$(cat "$W/src4/a")"
 is  "  the other checkout keeps its HEAD" "$S_HEAD" "$(git -C "$W/src" rev-parse HEAD)"
+is  "  and its work tree" "$S_TREE" "$(git -C "$W/src" status --porcelain)"
+[ -d "$W/src/.git" ] && ok "  along with its git dir" || bad "  along with its git dir"
+
+if [ "$HAVE_SYMLINK" ]; then
+	rm -rf "$W/src5"; mkdir -p "$W/src5"; ln -s "$W/src/.git" "$W/src5/.git"
+	S_HEAD=$(git -C "$W/src" rev-parse HEAD); S_TREE=$(git -C "$W/src" status --porcelain)
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir src5 --target-ref main
+	rc_is "a target whose .git is a symlink into another checkout" 0
+	[ -L "$W/src5/.git" ] && bad "  gets a git dir of its own" || ok "  gets a git dir of its own"
+	is  "  and the ref's content" three "$(cat "$W/src5/a")"
+	is  "  the other checkout keeps its HEAD" "$S_HEAD" "$(git -C "$W/src" rev-parse HEAD)"
+	is  "  and its work tree" "$S_TREE" "$(git -C "$W/src" status --porcelain)"
+	[ -d "$W/src/.git" ] && ok "  along with its git dir" || bad "  along with its git dir"
+else
+	skip "a target whose .git is a symlink into another checkout (no symlinks here)"
+fi
 
 touch "$W/src/.git/index.lock" "$W/src/.git/config.lock" "$W/src/.git/refs/remotes/origin/main.lock"
 advance four
@@ -265,6 +293,22 @@ RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcT --target-ref
 rc_is "a commit id" 0
 is  "  lands on that commit" "$SHA_MAIN" "$(git -C "$W/srcT" rev-parse HEAD)"
 
+# --- a tag deleted upstream ----------------------------------------------
+( cd "$T/seed" && git tag doomed && git push -q "$T/origin.git" refs/tags/doomed )
+rm -rf "$W/srcTD"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcTD --target-ref doomed
+rc_is "a tag that exists on the remote" 0
+git -C "$T/seed" push -q "$T/origin.git" --delete refs/tags/doomed
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcTD --target-ref main
+rc_is "prep: the deletion reaches the target" 0
+git -C "$W/srcTD" show-ref --verify --quiet refs/tags/doomed \
+    && bad "  the stale tag is pruned" || ok "  the stale tag is pruned"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcTD --target-ref doomed
+rc_is "a tag deleted from the remote fails" 1
+has "  saying it does not exist" "target ref does not exist"
+hasnt "  and heals nothing" "$HEAL"
+is  "  the checkout is left as it was" five "$(cat "$W/srcTD/a")"
+
 # --- a wrong repository is a caller mistake, never repaired -------------
 git -c init.defaultBranch=main init -q --bare "$T/other.git"
 ( cd "$T/seed" && git push -q "$T/other.git" main )
@@ -346,6 +390,21 @@ RUN "$W" "${ARGS[@]}";                        rc_is "a negative refspec in the s
 is  "  does not hold the store back either" seven "$(cat "$W/src/a")"
 is  "  with our refspecs restored there too" 3 "$(git -C "$W/ref.git" config --get-all remote.origin.fetch | wc -l | tr -d ' ')"
 
+# --- the alternates file is this script's to write -----------------------
+rm -rf "$W/srcA"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcA --target-ref main
+rc_is "prep: a target borrowing from the store" 0
+rm "$W/srcA/.git/objects/info/alternates"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcA --target-ref main
+rc_is "a target that lost its alternates" 0
+is_path "  borrows from the store again" "$W/ref.git/objects" "$(cat "$W/srcA/.git/objects/info/alternates" 2>/dev/null)"
+is  "  without copying the objects into itself" 0 "$(own_objects "$W/srcA/.git/objects")"
+
+printf '%s\n' "$W/refC.git/objects" > "$W/srcA/.git/objects/info/alternates"
+RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcA --target-ref main
+rc_is "an alternates naming another store" 0
+is_path "  is rewritten to the store that was asked for" "$W/ref.git/objects" "$(cat "$W/srcA/.git/objects/info/alternates" 2>/dev/null)"
+
 # --- the token: kept where the next step needs it, nowhere else ---------
 # The store and the target are fetched over https so the token applies, and
 # the machine's own config sends that url at the local origin. Nothing here
@@ -377,6 +436,31 @@ git -C "$W/srcP" add pushed-file
 git -C "$W/srcP" -c user.email=t@t -c user.name=t commit -qm pushed
 if git -C "$W/srcP" push -q 2>/dev/null; then ok "  and a bare 'git push' reaches origin"; else bad "  and a bare 'git push' reaches origin"; fi
 is  "  which now has the commit" "$(git -C "$W/srcP" rev-parse HEAD)" "$(git -C "$T/origin.git" rev-parse pushable)"
+
+# --- nonsense in the retry knobs -----------------------------------------
+OUT=$(cd "$W" && GIT_FETCH_RETRIES=lots "$SH" "$SCRIPT" "${ARGS[@]}" 2>&1); RC=$?
+rc_is "a retry count that is not a number" 0
+is  "  and the ref is checked out" seven "$(cat "$W/src/a")"
+rm -rf "$W/refN.git"
+OUT=$(cd "$W" && GIT_FETCH_DELAY=soon "$SH" "$SCRIPT" --repo "$T/nope.git" --ref-dir refN.git 2>&1); RC=$?
+rc_is "a retry delay that is not a number, on a fetch that fails" 1
+has "  waits the default instead" "Retrying in 2s"
+has "  and reaches the refusal it should" "not answering"
+
+# --- a failure a rebuild cannot fix --------------------------------------
+if [ "$HAVE_PERM" ]; then
+	rm -rf "$W/srcJ"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcJ --target-ref main
+	rc_is "prep: a target to jam" 0
+	mkdir -p "$W/srcJ/junk/sub"; echo x > "$W/srcJ/junk/sub/f"; chmod a-w "$W/srcJ/junk/sub"
+	RUN "$W" --repo "$T/origin.git" --ref-dir ref.git --target-dir srcJ --target-ref main --clean
+	rc_is "untracked debris that clean cannot remove" 1
+	is  "  rebuilds the git dir once, and no more" 1 "$(echo "$OUT" | grep -c "$TARGET_HEAL")"
+	is  "  the debris is left where it is" x "$(cat "$W/srcJ/junk/sub/f" 2>/dev/null)"
+	chmod u+w "$W/srcJ/junk/sub"; rm -rf "$W/srcJ"
+else
+	skip "untracked debris that clean cannot remove (deletes are not blocked here)"
+fi
 
 # --- usage ---------------------------------------------------------------
 RUN "$W";                                     rc_is "no arguments at all" 1
