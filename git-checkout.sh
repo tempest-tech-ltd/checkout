@@ -38,13 +38,10 @@ add_refspec() {
 	fi
 }
 
-# The url and the refspecs every fetch below relies on, written into whatever
-# config is there. 'git config' rather than 'git remote add', which fails on a
-# remote section that exists without a url - a half-written config's own state.
-# The list of refspecs is ours the way the url is: --replace-all drops whatever
-# else the key held, because a negative one left behind by hand ('^refs/heads/
-# main') survives an --add, keeps the fetch from updating that branch, and the
-# run then reports success over a checkout of an older commit.
+# 'git config', not 'git remote add': add fails on a remote section that has
+# no url. --replace-all on the fetch list: a negative refspec someone left
+# behind ('^refs/heads/main') survives --add and holds the checkout at an
+# older commit with exit 0.
 set_git_cfg() {
 	git config --replace-all remote.origin.url "$URL"
 	git config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
@@ -56,10 +53,9 @@ creds() {
 	echo -n "x-access-token:$GITHUB_TOKEN" | base64 | tr -d '\n'
 }
 
-# The store gets the token through the environment, for the length of the
-# fetch: it is shared by every job on the agent, and a credential written into
-# its config would outlive the run that owned it. The target keeps one in its
-# config on purpose - see init_target_repo.
+# The store is shared by every job on the runner, so its token lives in the
+# environment for the fetch only; the target keeps one in its config (see
+# init_target_repo).
 grant_token_env() {
 	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
 		GIT_CONFIG_COUNT=1
@@ -75,7 +71,6 @@ drop_token_env() {
 	unset GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 }
 
-# A filesystem root, or nothing at all: never a repository of ours.
 is_fs_root() {
 	case "$1" in
 		"" | / | // | ?:[/\\] | ?:[/\\][/\\] ) return 0 ;;
@@ -83,11 +78,8 @@ is_fs_root() {
 	return 1
 }
 
-# Turns the caller's path into the one the rest of the run uses, in DIR_ABS.
-# A '..' in a path that does not exist yet names something else once the dirs
-# above it appear: 'base/keep/new/..' is 'base/keep', which belongs to someone
-# else. Paths outside the workspace stay allowed - on Windows the default
-# workspace is too deep for a large checkout, so ours live elsewhere.
+# A '..' in a path that does not exist yet resolves elsewhere once the dirs
+# above it appear: 'base/keep/new/..' is 'base/keep', somebody else's.
 prepare_dir() {
 	is_fs_root "$1" && echo "Error: unsafe repository directory: '$1'" && exit 1
 	if [ ! -d "$1" ]; then
@@ -113,9 +105,8 @@ check_disjoint() {
 	return 0
 }
 
-# Whether two spellings name one repository. The stored url may lack the
-# '.git' this script appends, and git-bash hands git the windows spelling of a
-# posix path and stores it that way, so a local path can disagree with itself.
+# The stored url may lack the '.git' this script appends, and on git-bash git
+# stores the windows spelling of a posix path - one directory, two strings.
 same_repo() {
 	SRA=${1%.git}
 	SRB=${2%.git}
@@ -127,16 +118,14 @@ same_repo() {
 	[ "$SRA" ] && [ "$SRA" = "`cygpath -m -- "$SRB" 2>/dev/null`" ]
 }
 
-# A lock left behind by a job the machine killed stops every later write.
-# Nothing here runs two gits over one repo, so a lock found now is stale.
+# Nothing here runs two gits over one repo, so any lock found is a dead job's.
 clear_locks() {
 	find "$1" -name '*.lock' -type f -delete 2>/dev/null || true
 }
 
-# The url a store carries decides whether it is ours to repair. Read out of
-# the file, not through the repo, which in this state may not open at all.
-# Unset, unreadable or several values read as ours; only another repository,
-# plainly stated, is refused - a typo in a workflow, which no repair can fix.
+# Read from the file, not through git: the store may not open at all. Unset,
+# unreadable or several values count as ours; only a different repository,
+# plainly stated, is refused.
 check_ref_identity() {
 	GURL=`git config --file "$REF_DIR/config" --get remote.origin.url 2>/dev/null` || GURL=
 	[ "$GURL" ] || return 0
@@ -144,8 +133,7 @@ check_ref_identity() {
 	echo "Error: $REF_DIR belongs to $GURL, not $URL" && exit 1
 }
 
-# Everything a store needs, applied to whatever is there. 'init --bare' over a
-# live store rewrites exactly the files that go missing when a disk fills up
+# 'init --bare' over a live store rewrites the files a full disk leaves torn
 # and touches no object, so it runs every time rather than after a diagnosis.
 ref_steps() {
 	clear_locks .
@@ -157,9 +145,8 @@ ref_steps() {
 	return 0
 }
 
-# Whether the remote answers at all. Asked before a store is deleted: doing
-# that is pointless at the very moment nothing can be fetched back, and during
-# an outage the whole fleet would delete its stores and fail to clone again.
+# Asked before a store is deleted: during an outage the whole fleet would
+# otherwise delete its stores and fail to clone them back.
 probe_remote() {
 	git ls-remote --exit-code "$URL" HEAD >/dev/null 2>&1
 }
@@ -186,8 +173,7 @@ ref_repo() {
 	cd "$SAVED_PWD"
 }
 
-# T holds a checkout of another repository: its .git is not ours to recreate,
-# and the caller means a directory other than the one they named.
+# A checkout of another repository: its .git is not ours to recreate.
 check_target_identity() {
 	[ -f .git/config ] || return 0
 	GURL=`git config --file .git/config --get remote.origin.url 2>/dev/null` || GURL=
@@ -196,9 +182,8 @@ check_target_identity() {
 	echo "Error: $TARGET_DIR belongs to $GURL, not $URL" && exit 1
 }
 
-# A .git this script can use, or a new one. Nothing in a target's .git is
-# worth saving: HEAD, the branches and the index all come back from origin and
-# the store, while the work tree - the expensive part - is never touched.
+# Nothing in a target's .git is worth saving - HEAD, branches and index come
+# back from origin and the store; the work tree is never touched.
 init_target_repo() {
 	if [ -d .git ] && git rev-parse --resolve-git-dir .git >/dev/null 2>&1 &&
 		[ "`git config --get remote.origin.url 2>/dev/null`" ]; then
@@ -208,17 +193,15 @@ init_target_repo() {
 		rm -rf .git
 		REBUILT=1
 	fi
-	# Before init and the config writes below, which a stale config.lock
-	# would stop.
+	# A stale config.lock would stop init and the config writes below.
 	clear_locks .git
 	git init
 	set_git_cfg
 	# Rewritten every run: the file goes with the .git that held it, and a
 	# store the caller moved is the caller's decision, not a mismatch.
 	echo "$REF_DIR"/objects > .git/objects/info/alternates
-	# Unlike the store, the target keeps the token in its config: the steps
-	# after this action push with it, the way actions/checkout leaves its
-	# credentials behind.
+	# Kept in the target's config so later steps can push, as actions/checkout
+	# does with persist-credentials.
 	if [ "$URL" = "https://${URL#https://}" ] && [ "$GITHUB_TOKEN" ]; then
 		git config --replace-all http.extraHeader "Authorization: basic `creds`"
 	fi
@@ -250,16 +233,13 @@ EOF
 	git submodule deinit --force --all
 	rm -fr .git/modules
 
-	# Asked for, not assumed: a status that cannot be taken is not a clean
-	# tree, and this is what the caller was promised.
 	LEFT=`git status --porcelain --ignored` || return 1
 	[ "$LEFT" ] && echo Clean failed && return 1
 	return 0
 }
 
-# Only origin decides what a name means. A local branch left behind by an
-# earlier run outlives the remote branch it came from, and 'git checkout X'
-# would build that one - a branch deleted upstream would keep shipping.
+# Only origin says what a name means: 'git checkout X' would take a local
+# branch left by an earlier run after X was deleted upstream.
 resolve_ref() {
 	if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_REF"; then
 		RESOLVED=refs/remotes/origin/$TARGET_REF
@@ -269,9 +249,8 @@ resolve_ref() {
 		RESOLVED=refs/tags/$TARGET_REF
 		return 0
 	fi
-	# rev-parse answers with a ref before an object id, and this script
-	# leaves a local branch behind for every branch it builds - so an id is
-	# only looked up for a ref that cannot be a name at all.
+	# rev-parse resolves a ref before an object id, so an id is only looked up
+	# for an all-hex name, where a leftover local branch is improbable.
 	case "$TARGET_REF" in
 		"" | *[!0-9a-fA-F]* ) ;;
 		* ) RESOLVED=`git rev-parse --verify --quiet "$TARGET_REF^{commit}"` &&
@@ -280,10 +259,9 @@ resolve_ref() {
 	echo "Error: target ref does not exist: $TARGET_REF" && exit 1
 }
 
-# Always forced: a plain checkout can return 0 with tracked files still
-# modified, and this action promises a tree that matches the ref. -B keeps the
-# two side effects the workflows after it depend on - a local branch of that
-# name, and branch.X.remote/merge, which is what makes a bare 'git push' work.
+# Always --force: a plain checkout can return 0 with tracked files still
+# modified. -B from origin/X, not from the commit id: that sets
+# branch.X.remote/merge, which is what makes a bare 'git push' later work.
 checkout() {
 	case "$RESOLVED" in
 		refs/remotes/origin/* )
@@ -291,10 +269,9 @@ checkout() {
 		* )
 			git checkout --force "$RESOLVED" || return 1 ;;
 	esac
-	# A checkout that returned 0 has still gone wrong if HEAD is not the
-	# commit asked for: a refspec lost along the way leaves the remote ref
-	# behind and the build would quietly be an older one. Peeled the way
-	# the checkout peels it - an annotated tag is an object of its own.
+	# A refspec lost along the way leaves the remote ref behind and the
+	# checkout returns 0 on an older commit. Peeled: an annotated tag is an
+	# object of its own.
 	HAVE=`git rev-parse HEAD` || return 1
 	WANT=`git rev-parse "$RESOLVED^{commit}"` || return 1
 	[ "$HAVE" = "$WANT" ] && return 0
@@ -304,8 +281,7 @@ checkout() {
 
 target_steps() {
 	gitm fetch --prune --prune-tags --tags --force --recurse-submodules=no || return 1
-	# Before clean: a typo in a workflow's 'ref:' must not cost the caller
-	# their build directory.
+	# Before clean: a typo in 'ref:' must not cost the caller their build dir.
 	[ "$TARGET_REF" ] && resolve_ref
 	if [ "$CLEAN" ]; then
 		clean || return 1
@@ -317,9 +293,8 @@ target_steps() {
 target_repo() {
 	SAVED_PWD=$PWD
 	cd "$TARGET_DIR"
-	# A .git that is a file or a symlink keeps its metadata in another
-	# checkout, whose HEAD and index every command below would move while
-	# the files land here. Only the link itself goes, never what it names.
+	# A .git file or symlink keeps the metadata in another checkout, whose
+	# HEAD and index the commands below would move. Only the link goes.
 	if [ -L .git ] || { [ -e .git ] && [ ! -d .git ]; }; then
 		rm -f .git
 	fi
@@ -327,13 +302,10 @@ target_repo() {
 	REBUILT=
 	init_target_repo
 	if ! target_steps; then
-		# The one repeat inside a run, and the trigger is the failure
-		# itself, not what git said about it. A target's .git holds
-		# references only - HEAD, branches, the index - and reads the
-		# objects behind them from the store; once the store has been
-		# recloned they can point at nothing, and fetch, clean and
-		# checkout all fail against a store that is perfectly healthy.
-		# Every later run would fail the same way: the slot stays dead.
+		# The one repeat: a target's .git is references into the store's
+		# objects; after a store reclone they can point at nothing, and
+		# fetch, clean and checkout fail against a healthy store - on this
+		# run and on every next one.
 		[ "$REBUILT" ] && exit 1
 		echo "SELF-HEAL: target git-dir $TARGET_DIR"
 		rm -rf .git
