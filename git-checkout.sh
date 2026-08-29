@@ -1,6 +1,6 @@
 #!/bin/sh
 
-set -e
+set -e  # blind inside a function called from 'if !': there every command carries its own '|| return 1'
 
 usage() {
 	echo Usage: `basename $0` "[--repo REPO_URL] [--ref-dir DIR] [--target-dir DIR] [--target-ref GIT_REF] [--clean] [--debug]"
@@ -296,11 +296,9 @@ target_steps() {
 target_repo() {
 	SAVED_PWD=$PWD
 	cd "$TARGET_DIR"
-	# A .git file or symlink keeps the metadata in another checkout, whose
-	# HEAD and index the commands below would move. Only the link goes.
-	if [ -L .git ] || { [ -e .git ] && [ ! -d .git ]; }; then
-		rm -f .git
-	fi
+	# A .git symlink resolves into another checkout, whose HEAD and index the
+	# commands below would move; -d follows it. Only the link goes.
+	[ -L .git ] && rm -f .git
 	check_target_identity
 	REBUILT=
 	init_target_repo
